@@ -1,0 +1,28 @@
+# Credentials — never commit
+.env
+*.env.local
+
+# Build artifacts
+backend/target/
+frontend/node_modules/
+frontend/dist/
+mcp/node_modules/
+mcp/dist/
+
+# Logs
+logs/
+*.log
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.class
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Spring Boot
+backend/src/main/resources/static/*
+!backend/src/main/resources/static/.gitkeep

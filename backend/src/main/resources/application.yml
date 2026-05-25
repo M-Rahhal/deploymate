@@ -1,0 +1,34 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: deploymate
+  jackson:
+    default-property-inclusion: non_null
+
+deploymate:
+  github:
+    token: ${GITHUB_TOKEN}
+    org: ${GITHUB_ORG}
+  jenkins:
+    url: ${JENKINS_URL}
+    user: ${JENKINS_USER}
+    token: ${JENKINS_TOKEN}
+  jira:
+    url: ${JIRA_URL}
+    email: ${JIRA_EMAIL}
+    token: ${JIRA_TOKEN}
+  defaults:
+    target-branch: ${DEFAULT_TARGET_BRANCH:env/staging}
+    tag-prefix: ${TAG_PREFIX:env-stag}
+
+logging:
+  file:
+    name: logs/deploymate.log
+  pattern:
+    file: "[%d{yyyy-MM-dd'T'HH:mm:ss.SSSZ}] [%-7level] [%-20X{service}] [%-10X{stage}] %msg%n"
+    console: "%clr(%d{HH:mm:ss.SSS}){faint} %clr(%-5level){highlight} %clr([%-20X{service}]){cyan} %msg%n"
+  level:
+    root: INFO
+    com.deploymate: DEBUG
