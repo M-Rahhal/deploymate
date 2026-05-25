@@ -1,0 +1,59 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DeployMate — single-container compose file
+#
+# Usage:
+#   1. Copy .env.example to .env and fill in real values.
+#   2. docker compose up --build
+#   3. Open http://localhost:8080
+#
+# The MCP server is NOT containerised (it runs as a local stdio process
+# connected to Claude; see mcp/ directory for setup instructions).
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+  deploymate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: deploymate:latest
+    container_name: deploymate
+
+    # ── Port mapping ───────────────────────────────────────────────────────
+    ports:
+      - "8080:8080"
+
+    # ── Environment (reads from .env file in project root) ─────────────────
+    env_file:
+      - .env
+
+    # ── Named volume for persistent log storage ────────────────────────────
+    volumes:
+      - deploymate_logs:/app/logs
+
+    # ── Health check — Spring Boot Actuator-compatible (plain endpoint) ────
+    # The app doesn't include Actuator; use the SPA root as the probe.
+    healthcheck:
+      test:     ["CMD-SHELL", "wget -qO- http://localhost:8080/ | grep -q 'DeployMate\\|html' || exit 1"]
+      interval: 30s
+      timeout:  10s
+      retries:  3
+      start_period: 45s
+
+    # ── Restart policy ─────────────────────────────────────────────────────
+    restart: unless-stopped
+
+    # ── Resource limits (adjust to your host) ─────────────────────────────
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+          cpus:   "1.0"
+        reservations:
+          memory: 256M
+
+# ─────────────────────────────────────────────────────────────────────────────
+volumes:
+  deploymate_logs:
+    driver: local
