@@ -1,43 +1,41 @@
 package com.deploymate.config;
 
 import jakarta.annotation.PostConstruct;
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
+import lombok.AllArgsConstructor;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import lombok.Setter;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.stereotype.Component;
 import org.springframework.validation.annotation.Validated;
 
 import java.net.URI;
+import java.net.URL;
 import java.util.List;
 
+@Component
 @Validated
 @ConfigurationProperties(prefix = "deploymate")
-public record AppProperties(
-    GitHub github,
-    Jenkins jenkins,
-    Jira jira,
-    Defaults defaults
-) {
+@Getter
+@Setter
+@NoArgsConstructor
+@AllArgsConstructor
+public class AppProperties {
 
-    public record GitHub(
-        @NotBlank String token,
-        @NotBlank String org
-    ) {}
+    @Valid private GitHub   github;
+    @Valid private Jenkins  jenkins;
+    @Valid private Jira     jira;
+           private Defaults defaults;
 
-    public record Jenkins(
-        @NotBlank String url,
-        @NotBlank String user,
-        @NotBlank String token
-    ) {}
+    public record GitHub(@NotBlank String token, @NotBlank String org) {}
 
-    public record Jira(
-        @NotBlank String url,
-        @NotBlank String email,
-        @NotBlank String token
-    ) {}
+    public record Jenkins(@NotBlank String url, @NotBlank String user, @NotBlank String token) {}
 
-    public record Defaults(
-        String targetBranch,
-        String tagPrefix
-    ) {
+    public record Jira(@NotBlank String url, @NotBlank String email, @NotBlank String token) {}
+
+    public record Defaults(String targetBranch, String tagPrefix) {
         public Defaults {
             targetBranch = (targetBranch == null || targetBranch.isBlank()) ? "env/staging" : targetBranch;
             tagPrefix    = (tagPrefix    == null || tagPrefix.isBlank())    ? "env-stag"    : tagPrefix;
@@ -52,7 +50,7 @@ public record AppProperties(
 
     private void validateUrl(String name, String url) {
         try {
-            var parsed = URI.create(url).toURL();
+            URL parsed = URI.create(url).toURL();
             if (!List.of("http", "https").contains(parsed.getProtocol())) {
                 throw new IllegalStateException(name + " must use http or https scheme");
             }

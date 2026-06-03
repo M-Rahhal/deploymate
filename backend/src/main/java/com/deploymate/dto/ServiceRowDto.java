@@ -1,5 +1,6 @@
 package com.deploymate.dto;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.*;
 
 public record ServiceRowDto(
@@ -35,8 +36,20 @@ public record ServiceRowDto(
     @Pattern(regexp = "^([a-zA-Z0-9._-]{1,128})?$")
     String tagName,
 
-    boolean updateJira,
-    boolean skipMerge
+    @NotNull @Valid
+    Steps steps
 ) {
     public enum ServiceType { SDK, SERVICE }
+
+    /**
+     * Explicit per-service step configuration.
+     * Each step can be independently enabled or disabled.
+     * Pipeline param: createTag=true → TAG=tagName, false → BRANCH=targetBranch.
+     */
+    public record Steps(
+        boolean mergeBranch,
+        boolean createTag,
+        boolean triggerPipeline,
+        boolean updateJira
+    ) {}
 }

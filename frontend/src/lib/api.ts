@@ -95,3 +95,47 @@ export async function apiDeployAll(ticket: string, rows: ServiceRowDto[]): Promi
 export async function apiGetLog(lines = 200): Promise<string[]> {
   return get<string[]>('/log', { lines: String(lines) });
 }
+
+// ─── Tag — next tag suggestion ─────────────────────────────────────────────
+
+export async function apiGetNextTag(
+  repo: string,
+  jenkinsJob?: string
+): Promise<{ tagName: string; previousTag: string; lastDeployedTag: string | null }> {
+  const params: Record<string, string> = { repo };
+  if (jenkinsJob) params.jenkinsJob = jenkinsJob;
+  return get<{ tagName: string; previousTag: string; lastDeployedTag: string | null }>('/tag/next', params);
+}
+
+// ─── GitHub — branch commit info ───────────────────────────────────────────
+
+export interface BranchInfo {
+  sha:         string;
+  shortSha:    string;
+  authorLogin: string;
+  authorName:  string;
+  message:     string;
+  committedAt: string;
+}
+
+export async function apiGetBranchInfo(repo: string, branch: string): Promise<BranchInfo> {
+  return get<BranchInfo>('/github/branch-info', { repo, branch });
+}
+
+// ─── Jenkins config (categories + service names) ───────────────────────────
+
+export async function apiGetCategories(): Promise<string[]> {
+  return get<string[]>('/jenkins/categories');
+}
+
+export async function apiSaveCategory(name: string): Promise<void> {
+  await post('/jenkins/categories', { name });
+}
+
+export async function apiGetServiceNames(category: string): Promise<string[]> {
+  return get<string[]>('/jenkins/service-names', { category });
+}
+
+export async function apiSaveServiceName(category: string, name: string): Promise<void> {
+  await post('/jenkins/service-names', { category, name });
+}

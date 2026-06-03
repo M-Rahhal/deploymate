@@ -1,12 +1,12 @@
-import { useState } from 'react';
-import { Trash2, GitMerge, Tag, Rocket, Play, ChevronDown, ChevronUp } from 'lucide-react';
+import { useState, useEffect, useId } from 'react';
+import { Trash2, GitMerge, Tag, Rocket, Play, ChevronDown, ChevronUp, RefreshCw, Loader2, GitCommit } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-import { Button }  from '@/components/ui/button';
-import { Input }   from '@/components/ui/input';
-import { Label }   from '@/components/ui/label';
-import { Switch }  from '@/components/ui/switch';
-import { Badge }   from '@/components/ui/badge';
+import { Button }    from '@/components/ui/button';
+import { Input }     from '@/components/ui/input';
+import { Label }     from '@/components/ui/label';
+import { Switch }    from '@/components/ui/switch';
+import { Badge }     from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from '@/components/ui/select';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
@@ -15,38 +15,251 @@ import { useDeployStore }   from '@/hooks/useDeployStore';
 import { useMergeAction, useTagAction, usePipelineAction, useAllStepsAction } from '@/hooks/useDeployActions';
 import { computeOverallState } from '@/types';
 import { shortSha } from '@/lib/utils';
+import {
+  apiGetCategories, apiSaveCategory,
+  apiGetServiceNames, apiSaveServiceName,
+  apiGetNextTag,
+  apiGetBranchInfo,
+} from '@/lib/api';
+import type { BranchInfo } from '@/lib/api';
 
 import { StatusBadge }   from './StatusBadge';
 import { StepBadge }     from './StepBadge';
 import { ConflictPanel } from './ConflictPanel';
 import { BuildLogButton } from './BuildLogDrawer';
 
-import type { ServiceRow as ServiceRowType } from '@/types';
+import type { ServiceRow as ServiceRowType, ServiceRowSteps, JenkinsEnvMode } from '@/types';
 
-// ─── Hard-coded org from env (or use a config store field in future) ──────────
-const ORG = ((window as unknown) as Record<string, unknown>)['__ORG__'] as string | undefined ?? '';
+
 
 interface ServiceRowProps {
   row:   ServiceRowType;
   index: number;
 }
 
+// ─── Jenkins URL builder sub-component ────────────────────────────────────────
+
+interface JenkinsBuilderProps {
+  row:       ServiceRowType;
+  disabled:  boolean;
+  onField:   (key: keyof ServiceRowType, value: string | boolean | number) => void;
+}
+
+function JenkinsBuilder({ row, disabled, onField }: JenkinsBuilderProps) {
+  const [categories, setCategories]   = useState<string[]>([]);
+  const [serviceNames, setServiceNames] = useState<string[]>([]);
+
+  const catListId  = useId();
+  const nameListId = useId();
+
+  // Load categories on mount
+  useEffect(() => {
+    apiGetCategories().then(setCategories).catch(() => {});
+  }, []);
+
+  // Load service names when category changes
+  useEffect(() => {
+    if (!row.jenkinsCategory) { setServiceNames([]); return; }
+    apiGetServiceNames(row.jenkinsCategory).then(setServiceNames).catch(() => {});
+  }, [row.jenkinsCategory]);
+
+  function handleCategoryBlur() {
+    const val = row.jenkinsCategory.trim();
+    if (!val) return;
+    if (!categories.includes(val)) {
+      apiSaveCategory(val).then(() =>
+        setCategories((prev) => [...prev, val].sort())
+      ).catch(() => {});
+    }
+  }
+
+  function handleServiceNameBlur() {
+    const val = row.jenkinsServiceName.trim();
+    const cat = row.jenkinsCategory.trim();
+    if (!val || !cat) return;
+    if (!serviceNames.includes(val)) {
+      apiSaveServiceName(cat, val).then(() =>
+        setServiceNames((prev) => [...prev, val].sort())
+      ).catch(() => {});
+    }
+  }
+
+  const resolvedEnv = row.jenkinsEnvMode === 'env'
+    ? (row.jenkinsEnv || '—')
+    : (row.type === 'SERVICE' ? 'staging' : 'dev');
+
+  return (
+    <div className="space-y-3">
+      {/* Category */}
+      <div className="space-y-1">
+        <Label className="text-[10px] uppercase tracking-wider text-slate-500">Jenkins category</Label>
+        <input
+          list={catListId}
+          value={row.jenkinsCategory}
+          onChange={(e) => onField('jenkinsCategory', e.target.value)}
+          onBlur={handleCategoryBlur}
+          placeholder="cross-products"
+          disabled={disabled}
+          className="flex h-7 w-full rounded-md border border-slate-700 bg-slate-800 px-2 py-1 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:opacity-50"
+        />
+        <datalist id={catListId}>
+          {categories.map((c) => <option key={c} value={c} />)}
+        </datalist>
+      </div>
+
+      {/* Environment / Type toggle */}
+      <div className="space-y-1.5">
+        <Label className="text-[10px] uppercase tracking-wider text-slate-500">
+          Environment segment
+        </Label>
+        <div className="flex items-center gap-3">
+          {/* Mode selector */}
+          <div className="flex rounded-md border border-slate-700 overflow-hidden text-xs">
+            <button
+              type="button"
+              onClick={() => onField('jenkinsEnvMode', 'type' as JenkinsEnvMode)}
+              disabled={disabled}
+              className={`px-2.5 py-1 transition-colors ${
+                row.jenkinsEnvMode === 'type'
+                  ? 'bg-indigo-700 text-white'
+                  : 'bg-slate-800 text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              By type
+            </button>
+            <button
+              type="button"
+              onClick={() => onField('jenkinsEnvMode', 'env' as JenkinsEnvMode)}
+              disabled={disabled}
+              className={`px-2.5 py-1 transition-colors ${
+                row.jenkinsEnvMode === 'env'
+                  ? 'bg-indigo-700 text-white'
+                  : 'bg-slate-800 text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              By env
+            </button>
+          </div>
+
+          {row.jenkinsEnvMode === 'type' ? (
+            <span className="text-xs text-slate-400">
+              {row.type === 'SERVICE'
+                ? <><span className="font-mono text-amber-400">staging</span> (SERVICE)</>
+                : <><span className="font-mono text-sky-400">dev</span> (SDK)</>
+              }
+            </span>
+          ) : (
+            <Select
+              value={row.jenkinsEnv || 'dev'}
+              onValueChange={(v) => onField('jenkinsEnv', v)}
+              disabled={disabled}
+            >
+              <SelectTrigger className="h-7 w-28 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="dev">dev</SelectItem>
+                <SelectItem value="staging">staging</SelectItem>
+              </SelectContent>
+            </Select>
+          )}
+        </div>
+      </div>
+
+      {/* Service / SDK name */}
+      <div className="space-y-1">
+        <Label className="text-[10px] uppercase tracking-wider text-slate-500">Service name</Label>
+        <input
+          list={nameListId}
+          value={row.jenkinsServiceName}
+          onChange={(e) => onField('jenkinsServiceName', e.target.value)}
+          onBlur={handleServiceNameBlur}
+          placeholder="payment-eligibility-service"
+          disabled={disabled}
+          className="flex h-7 w-full rounded-md border border-slate-700 bg-slate-800 px-2 py-1 font-mono text-xs text-slate-100 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:opacity-50"
+        />
+        <datalist id={nameListId}>
+          {serviceNames.map((n) => <option key={n} value={n} />)}
+        </datalist>
+      </div>
+
+      {/* Computed URL preview — always shown when at least one part is filled */}
+      {(row.jenkinsCategory || row.jenkinsServiceName) && (
+        <p className="text-[11px] text-slate-500 font-mono break-all">
+          <span className="text-slate-600">Jenkins path: </span>
+          <span className="text-indigo-400">/job/</span>
+          <span className={row.jenkinsCategory ? 'text-slate-300' : 'text-slate-600'}>
+            {row.jenkinsCategory || '‹category›'}
+          </span>
+          <span className="text-indigo-400">/job/</span>
+          <span className="text-sky-400">{resolvedEnv}</span>
+          <span className="text-indigo-400">/job/</span>
+          <span className={row.jenkinsServiceName ? 'text-slate-300' : 'text-slate-600'}>
+            {row.jenkinsServiceName || '‹service›'}
+          </span>
+          <span className="text-indigo-400">/</span>
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ─── Main ServiceRow component ────────────────────────────────────────────────
+
 export function ServiceRow({ row, index }: ServiceRowProps) {
-  const { updateRow, removeRow }          = useDeployStore();
-  const { run: runMerge,   running: mR }  = useMergeAction(row, ORG);
-  const { run: runTag,     running: tR }  = useTagAction(row, ORG);
-  const { run: runPipeline, running: pR } = usePipelineAction(row);
-  const { runAll,           running: aR } = useAllStepsAction(row, ORG);
+  const { updateRow, updateSteps, removeRow } = useDeployStore();
+  const { run: runMerge,    running: mR }  = useMergeAction(row);
+  const { run: runTag,      running: tR }  = useTagAction(row);
+  const { run: runPipeline, running: pR }  = usePipelineAction(row);
+  const { runAll,            running: aR } = useAllStepsAction(row);
 
   const [expanded, setExpanded] = useState(true);
 
-  const overall  = computeOverallState(row);
-  const anyBusy  = mR || tR || pR || aR;
-  const isDone   = overall === 'DONE';
-  const isSdk    = row.type === 'SDK';
+  // ── GitHub info state ──────────────────────────────────────────
+  const [fetchingInfo,     setFetchingInfo]     = useState(false);
+  const [previousTag,      setPreviousTag]      = useState<string | null>(null);
+  const [lastDeployedTag,  setLastDeployedTag]  = useState<string | null>(null);
+  const [sourceBranchInfo, setSourceBranchInfo] = useState<BranchInfo | null>(null);
+  const [targetBranchInfo, setTargetBranchInfo] = useState<BranchInfo | null>(null);
+
+  // Clear stale info when the underlying fields change
+  useEffect(() => { setSourceBranchInfo(null); }, [row.sourceBranch]);
+  useEffect(() => { setTargetBranchInfo(null); }, [row.targetBranch]);
+  useEffect(() => { setPreviousTag(null); setLastDeployedTag(null); }, [row.repo]);
+
+  async function fetchRepoInfo() {
+    if (!row.repo || fetchingInfo) return;
+    setFetchingInfo(true);
+    const [tagRes, srcRes, tgtRes] = await Promise.allSettled([
+      apiGetNextTag(row.repo, row.jenkinsJob || undefined),
+      row.sourceBranch ? apiGetBranchInfo(row.repo, row.sourceBranch) : Promise.resolve(null),
+      row.targetBranch ? apiGetBranchInfo(row.repo, row.targetBranch) : Promise.resolve(null),
+    ]);
+
+    if (tagRes.status === 'fulfilled') {
+      setPreviousTag(tagRes.value.previousTag || null);
+      setLastDeployedTag(tagRes.value.lastDeployedTag || null);
+      // Pre-fill tag name only when it's still empty
+      if (!row.tagName && tagRes.value.tagName) {
+        updateRow(row.id, { tagName: tagRes.value.tagName });
+      }
+    }
+    if (srcRes.status === 'fulfilled' && srcRes.value) setSourceBranchInfo(srcRes.value);
+    if (tgtRes.status === 'fulfilled' && tgtRes.value) setTargetBranchInfo(tgtRes.value);
+
+    setFetchingInfo(false);
+  }
+
+  const overall = computeOverallState(row);
+  const anyBusy = mR || tR || pR || aR;
+  const isDone  = overall === 'DONE';
 
   function field(key: keyof ServiceRowType, value: string | boolean | number) {
     updateRow(row.id, { [key]: value } as Partial<ServiceRowType>);
+  }
+
+  function step(key: keyof ServiceRowSteps, value: boolean) {
+    updateSteps(row.id, { [key]: value });
   }
 
   return (
@@ -58,14 +271,12 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
       transition={{ duration: 0.15 }}
       className="rounded-lg border border-slate-800 bg-slate-900 shadow-sm"
     >
-      {/* ── Header row ─────────────────────────────────────────────────── */}
+      {/* ── Header ──────────────────────────────────────────────────────── */}
       <div className="flex items-center gap-3 px-4 py-3">
-        {/* Index pill */}
         <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-800 text-[10px] font-bold text-slate-400">
           {index + 1}
         </span>
 
-        {/* Name */}
         <Input
           value={row.name}
           onChange={(e) => field('name', e.target.value)}
@@ -74,7 +285,6 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
           disabled={anyBusy}
         />
 
-        {/* Repo */}
         <Input
           value={row.repo}
           onChange={(e) => field('repo', e.target.value)}
@@ -83,15 +293,12 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
           disabled={anyBusy}
         />
 
-        {/* Type badge */}
-        <Badge variant={isSdk ? 'default' : 'secondary'} className="shrink-0">
+        <Badge variant={row.type === 'SDK' ? 'default' : 'secondary'} className="shrink-0">
           {row.type}
         </Badge>
 
-        {/* Overall status */}
         <StatusBadge state={overall} className="shrink-0" />
 
-        {/* Expand/collapse */}
         <Button
           variant="ghost"
           size="sm"
@@ -101,13 +308,13 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
           {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
         </Button>
 
-        {/* Delete */}
         <Button
           variant="ghost"
           size="sm"
           className="h-7 w-7 shrink-0 p-0 text-slate-600 hover:text-rose-400"
           onClick={() => removeRow(row.id)}
           disabled={anyBusy}
+          aria-label="Remove row"
         >
           <Trash2 className="h-4 w-4" />
         </Button>
@@ -126,8 +333,30 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
           >
             <Separator />
 
+            {/* ── Fetch Info from GitHub ───────────────────────────────── */}
+            <div className="flex items-center gap-3 border-b border-slate-800 px-4 py-2">
+              <button
+                type="button"
+                onClick={fetchRepoInfo}
+                disabled={anyBusy || fetchingInfo || !row.repo}
+                className="flex h-7 items-center gap-1.5 rounded-md border border-slate-700 bg-slate-800 px-2.5 text-xs text-slate-300 hover:border-indigo-500 hover:text-indigo-300 disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
+              >
+                {fetchingInfo
+                  ? <Loader2 className="h-3 w-3 animate-spin" />
+                  : <RefreshCw className="h-3 w-3" />
+                }
+                {fetchingInfo ? 'Fetching…' : 'Fetch Info'}
+              </button>
+              <span className="text-[11px] text-slate-600">
+                {!row.repo
+                  ? 'Enter a repo name to fetch GitHub info'
+                  : 'Latest GitHub tag · last Jenkins deploy · branch commits'}
+              </span>
+            </div>
+
+            {/* ── Fields grid ─────────────────────────────────────────── */}
             <div className="grid grid-cols-2 gap-x-4 gap-y-3 px-4 py-3 sm:grid-cols-3 lg:grid-cols-4">
-              {/* Type select */}
+              {/* Type */}
               <div className="space-y-1">
                 <Label className="text-[10px] uppercase tracking-wider text-slate-500">Type</Label>
                 <Select
@@ -145,21 +374,19 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
                 </Select>
               </div>
 
-              {/* Stage (SDK only) */}
-              {isSdk && (
-                <div className="space-y-1">
-                  <Label className="text-[10px] uppercase tracking-wider text-slate-500">Stage</Label>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={20}
-                    value={row.stage}
-                    onChange={(e) => field('stage', Number(e.target.value))}
-                    className="h-7 text-xs"
-                    disabled={anyBusy}
-                  />
-                </div>
-              )}
+              {/* Stage */}
+              <div className="space-y-1">
+                <Label className="text-[10px] uppercase tracking-wider text-slate-500">Stage</Label>
+                <Input
+                  type="number"
+                  min={1}
+                  max={99}
+                  value={row.stage}
+                  onChange={(e) => field('stage', Number(e.target.value))}
+                  className="h-7 text-xs"
+                  disabled={anyBusy}
+                />
+              </div>
 
               {/* Source branch */}
               <div className="space-y-1">
@@ -169,8 +396,18 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
                   onChange={(e) => field('sourceBranch', e.target.value)}
                   placeholder="feature/my-branch"
                   className="h-7 font-mono text-xs"
-                  disabled={anyBusy || row.skipMerge}
+                  disabled={anyBusy || !row.steps.mergeBranch}
                 />
+                {sourceBranchInfo && (
+                  <p className="flex items-center gap-1 text-[11px] text-slate-500 font-mono truncate">
+                    <GitCommit className="h-3 w-3 shrink-0 text-slate-600" />
+                    <span className="text-indigo-400">{sourceBranchInfo.shortSha}</span>
+                    <span className="text-slate-600">·</span>
+                    <span className="truncate">{sourceBranchInfo.authorName}{sourceBranchInfo.authorLogin ? ` (@${sourceBranchInfo.authorLogin})` : ''}</span>
+                    <span className="text-slate-600">·</span>
+                    <span className="truncate italic text-slate-500">{sourceBranchInfo.message}</span>
+                  </p>
+                )}
               </div>
 
               {/* Target branch */}
@@ -183,90 +420,158 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
                   className="h-7 font-mono text-xs"
                   disabled={anyBusy}
                 />
+                {targetBranchInfo && (
+                  <p className="flex items-center gap-1 text-[11px] text-slate-500 font-mono truncate">
+                    <GitCommit className="h-3 w-3 shrink-0 text-slate-600" />
+                    <span className="text-indigo-400">{targetBranchInfo.shortSha}</span>
+                    <span className="text-slate-600">·</span>
+                    <span className="truncate">{targetBranchInfo.authorName}{targetBranchInfo.authorLogin ? ` (@${targetBranchInfo.authorLogin})` : ''}</span>
+                    <span className="text-slate-600">·</span>
+                    <span className="truncate italic text-slate-500">{targetBranchInfo.message}</span>
+                  </p>
+                )}
               </div>
 
-              {/* Jenkins job */}
-              <div className="space-y-1 sm:col-span-2">
-                <Label className="text-[10px] uppercase tracking-wider text-slate-500">Jenkins job</Label>
-                <Input
-                  value={row.jenkinsJob}
-                  onChange={(e) => field('jenkinsJob', e.target.value)}
-                  placeholder="team/my-deploy-job"
-                  className="h-7 font-mono text-xs"
-                  disabled={anyBusy}
-                />
-              </div>
-
-              {/* Tag name (SERVICE only) */}
-              {!isSdk && (
+              {/* Tag name — always visible for SERVICE rows (git_branch = tagName for Jenkins) */}
+              {row.type === 'SERVICE' && (
                 <div className="space-y-1 sm:col-span-2">
-                  <Label className="text-[10px] uppercase tracking-wider text-slate-500">Tag name</Label>
+                  <Label className="text-[10px] uppercase tracking-wider text-slate-500">
+                    Tag name
+                    <span className="ml-1 text-indigo-400">(git_branch for Jenkins)</span>
+                  </Label>
                   <Input
                     value={row.tagName}
                     onChange={(e) => field('tagName', e.target.value)}
-                    placeholder="env-stag-20240101-repo-001"
+                    placeholder="v1.0.0rc1"
                     className="h-7 font-mono text-xs"
-                    disabled={anyBusy || row.skipMerge}
+                    disabled={anyBusy}
                   />
+                  {(previousTag || lastDeployedTag) ? (
+                    <div className="space-y-0.5">
+                      {previousTag && (
+                        <p className="text-[11px] text-slate-500">
+                          Latest GitHub tag:
+                          <span className="ml-1 font-mono text-amber-400">{previousTag}</span>
+                        </p>
+                      )}
+                      {lastDeployedTag && (
+                        <p className="text-[11px] text-slate-500">
+                          Last Jenkins deploy:
+                          <span className="ml-1 font-mono text-sky-400">{lastDeployedTag}</span>
+                        </p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-slate-600">
+                      Click <span className="text-slate-400">Fetch Info</span> to see latest tag and last deploy
+                    </p>
+                  )}
                 </div>
               )}
 
-              {/* Toggles */}
-              <div className="flex flex-col gap-2 pt-1">
-                {/* Skip merge */}
+              {/* Pipeline param hint — SDK only (SERVICE always uses tag, shown in tag field above) */}
+              {row.type !== 'SERVICE' && row.steps.triggerPipeline && (
+                <div className="space-y-1 sm:col-span-2 flex items-end">
+                  <p className="text-[11px] text-slate-500">
+                    Pipeline param:
+                    <span className="ml-1 font-mono text-amber-400">
+                      git_branch=origin/{row.targetBranch || 'env/staging'}
+                    </span>
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* ── Jenkins URL builder ──────────────────────────────────── */}
+            <div className="border-t border-slate-800 px-4 py-3">
+              <p className="mb-3 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                Jenkins job
+              </p>
+              <JenkinsBuilder row={row} disabled={anyBusy} onField={field} />
+            </div>
+
+            {/* ── Steps configuration ──────────────────────────────────── */}
+            <div className="border-t border-slate-800 px-4 py-3">
+              <p className="mb-2.5 text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+                Steps to execute
+              </p>
+              <div className="flex flex-wrap gap-x-5 gap-y-2">
                 <div className="flex items-center gap-2">
                   <Switch
-                    id={`skip-${row.id}`}
-                    checked={row.skipMerge}
-                    onCheckedChange={(v) => field('skipMerge', v)}
+                    id={`merge-${row.id}`}
+                    checked={row.steps.mergeBranch}
+                    onCheckedChange={(v) => step('mergeBranch', v)}
                     disabled={anyBusy}
                   />
-                  <Label htmlFor={`skip-${row.id}`} className="cursor-pointer text-xs text-slate-400">
-                    Skip merge
-                    {row.skipMerge && (
-                      <span className="ml-1 text-amber-400">(deploy-only)</span>
-                    )}
+                  <Label htmlFor={`merge-${row.id}`} className="cursor-pointer text-xs text-slate-300">
+                    Merge branch
                   </Label>
                 </div>
 
-                {/* Update Jira */}
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id={`tag-${row.id}`}
+                    checked={row.steps.createTag}
+                    onCheckedChange={(v) => step('createTag', v)}
+                    disabled={anyBusy}
+                  />
+                  <Label htmlFor={`tag-${row.id}`} className="cursor-pointer text-xs text-slate-300">
+                    Create tag
+                  </Label>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id={`pipeline-${row.id}`}
+                    checked={row.steps.triggerPipeline}
+                    onCheckedChange={(v) => step('triggerPipeline', v)}
+                    disabled={anyBusy}
+                  />
+                  <Label htmlFor={`pipeline-${row.id}`} className="cursor-pointer text-xs text-slate-300">
+                    Trigger pipeline
+                  </Label>
+                </div>
+
                 <div className="flex items-center gap-2">
                   <Switch
                     id={`jira-${row.id}`}
-                    checked={row.updateJira}
-                    onCheckedChange={(v) => field('updateJira', v)}
+                    checked={row.steps.updateJira}
+                    onCheckedChange={(v) => step('updateJira', v)}
                     disabled={anyBusy}
                   />
-                  <Label htmlFor={`jira-${row.id}`} className="cursor-pointer text-xs text-slate-400">
-                    Update Jira
+                  <Label htmlFor={`jira-${row.id}`} className="cursor-pointer text-xs text-slate-300">
+                    Post Jira comment
                   </Label>
                 </div>
               </div>
             </div>
 
-            {/* ── Step states ───────────────────────────────────────────────── */}
+            {/* ── Step states + action buttons ─────────────────────────── */}
             <div className="flex flex-wrap items-center gap-2 border-t border-slate-800 px-4 py-2.5">
-              <StepBadge
-                step="Merge"
-                state={row.mergeState}
-                detail={row.mergeState === 'DONE' ? shortSha(row.mergeCommitSha) : null}
-              />
-              {!isSdk && (
+              {row.steps.mergeBranch && (
+                <StepBadge
+                  step="Merge"
+                  state={row.mergeState}
+                  detail={row.mergeState === 'DONE' ? shortSha(row.mergeCommitSha) : null}
+                />
+              )}
+              {row.type === 'SERVICE' && (
                 <StepBadge
                   step="Tag"
                   state={row.tagState}
                   detail={row.tagState === 'DONE' && row.tagReleaseUrl ? 'released' : null}
                 />
               )}
-              <StepBadge
-                step="Pipeline"
-                state={row.pipelineState}
-                detail={row.buildNumber ? `#${row.buildNumber}` : null}
-              />
+              {row.steps.triggerPipeline && (
+                <StepBadge
+                  step="Pipeline"
+                  state={row.pipelineState}
+                  detail={row.buildNumber ? `#${row.buildNumber}` : null}
+                />
+              )}
 
               <BuildLogButton row={row} />
 
-              {/* Error message */}
               {row.errorMessage && overall === 'FAILED' && (
                 <span className="text-[11px] text-rose-400">{row.errorMessage}</span>
               )}
@@ -274,7 +579,7 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
               {/* ── Action buttons ──────────────────────────────────────── */}
               <div className="ml-auto flex items-center gap-1.5">
                 {/* Merge */}
-                {!row.skipMerge && row.mergeState !== 'DONE' && (
+                {row.steps.mergeBranch && row.mergeState !== 'DONE' && (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
@@ -292,8 +597,8 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
                   </Tooltip>
                 )}
 
-                {/* Tag (SERVICE, !skipMerge, merge done) */}
-                {!isSdk && !row.skipMerge && row.mergeState === 'DONE' && row.tagState !== 'DONE' && (
+                {/* Tag */}
+                {row.steps.createTag && row.mergeState === 'DONE' && row.tagState !== 'DONE' && (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
@@ -312,7 +617,7 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
                 )}
 
                 {/* Pipeline */}
-                {row.pipelineState !== 'DONE' && (
+                {row.steps.triggerPipeline && row.pipelineState !== 'DONE' && (
                   <Tooltip>
                     <TooltipTrigger asChild>
                       <Button
@@ -326,11 +631,14 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
                         Pipeline
                       </Button>
                     </TooltipTrigger>
-                    <TooltipContent>Trigger Jenkins: {row.jenkinsJob}</TooltipContent>
+                    <TooltipContent>
+                      Trigger {row.jenkinsJob}
+                      {row.type === 'SERVICE' ? ` (git_branch=${row.tagName || '?'})` : ` (git_branch=origin/${row.targetBranch})`}
+                    </TooltipContent>
                   </Tooltip>
                 )}
 
-                {/* Run all steps */}
+                {/* Run all configured steps */}
                 {!isDone && (
                   <Tooltip>
                     <TooltipTrigger asChild>
@@ -344,7 +652,7 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
                         {anyBusy ? 'Running…' : 'Run all'}
                       </Button>
                     </TooltipTrigger>
-                    <TooltipContent>Run all pending steps in sequence</TooltipContent>
+                    <TooltipContent>Run all configured steps in sequence</TooltipContent>
                   </Tooltip>
                 )}
               </div>
@@ -353,7 +661,7 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
             {/* ── Conflict panel ─────────────────────────────────────────── */}
             {row.mergeState === 'CONFLICT' && (
               <div className="border-t border-slate-800 px-4 pb-3 pt-2">
-                <ConflictPanel row={row} org={ORG} />
+                <ConflictPanel row={row} />
               </div>
             )}
           </motion.div>

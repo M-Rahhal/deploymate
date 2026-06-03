@@ -1,14 +1,12 @@
 package com.deploymate.service;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.stereotype.Service;
 
+@Slf4j(topic = "deploymate.events")
 @Service
 public class LogService {
-
-    private static final Logger log = LoggerFactory.getLogger("deploymate.events");
 
     public void info(String service, String stage, String message) {
         withMdc(service, stage, () -> log.info("{}", message));

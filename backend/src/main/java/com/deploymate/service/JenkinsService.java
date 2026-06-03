@@ -5,40 +5,29 @@ import com.deploymate.model.DeployException;
 import com.deploymate.model.ErrorCode;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import okhttp3.*;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.Optional;
 
+@Slf4j
 @Service
+@RequiredArgsConstructor
 public class JenkinsService {
-
-    private static final Logger log = LoggerFactory.getLogger(JenkinsService.class);
 
     private final OkHttpClient client;
     private final ObjectMapper mapper;
     private final AppProperties props;
 
-    public JenkinsService(AppProperties props) {
-        this.props  = props;
-        this.mapper = new ObjectMapper();
-        this.client = new OkHttpClient.Builder().build();
-    }
-
-    // Package-private constructor for tests
-    JenkinsService(AppProperties props, OkHttpClient client) {
-        this.props  = props;
-        this.mapper = new ObjectMapper();
-        this.client = client;
-    }
 
     private String basicAuth() {
-        var creds = props.jenkins().user() + ":" + props.jenkins().token();
+        String creds = props.getJenkins().user() + ":" + props.getJenkins().token();
         return "Basic " + Base64.getEncoder().encodeToString(creds.getBytes(StandardCharsets.UTF_8));
     }
 
@@ -47,7 +36,7 @@ public class JenkinsService {
     }
 
     private String jenkinsBase() {
-        return props.jenkins().url();
+        return props.getJenkins().url();
     }
 
     private record Crumb(String field, String value) {}
@@ -56,10 +45,10 @@ public class JenkinsService {
      * Fetches CSRF crumb — required before every POST to Jenkins.
      */
     private Crumb getCrumb() {
-        var req = authed()
+        Request req = authed()
             .url(jenkinsBase() + "/crumbIssuer/api/json")
             .build();
-        try (var resp = client.newCall(req).execute()) {
+        try (Response resp = client.newCall(req).execute()) {
             if (!resp.isSuccessful()) {
                 throw new DeployException(
                     "Failed to get Jenkins crumb: HTTP " + resp.code(), ErrorCode.AUTH_FAILED);
@@ -77,29 +66,31 @@ public class JenkinsService {
     }
 
     /**
-     * Triggers a build with parameters. Returns the queue item URL from the Location header.
-     * paramType is either "BRANCH" or "TAG".
+     * Triggers a build with the "git_branch" parameter.
+     * For SDKs: gitBranchValue = "origin/{targetBranch}".
+     * For SERVICEs with a tag: gitBranchValue = tagName.
+     * Returns the queue item URL from the Location header.
      */
-    public String triggerBuild(String jobPath, String paramType, String paramValue) {
-        var crumb  = getCrumb();
+    public String triggerBuild(String jobPath, String gitBranchValue) {
+        Crumb crumb = getCrumb();
         // Convert forward-slash job path into Jenkins URL format: a/b → /job/a/job/b
-        var urlPath = "/job/" + jobPath.replace("/", "/job/");
-        var url    = jenkinsBase() + urlPath + "/buildWithParameters?"
-                     + paramType + "=" + URLEncoder.encode(paramValue, StandardCharsets.UTF_8);
+        String urlPath = "/job/" + jobPath.replace("/", "/job/");
+        String url = jenkinsBase() + urlPath + "/buildWithParameters?git_branch="
+                     + URLEncoder.encode(gitBranchValue, StandardCharsets.UTF_8);
 
-        var req = authed()
+        Request req = authed()
             .url(url)
             .header(crumb.field(), crumb.value())
             .post(RequestBody.create(new byte[0]))
             .build();
 
-        try (var resp = client.newCall(req).execute()) {
+        try (Response resp = client.newCall(req).execute()) {
             if (resp.code() != 201) {
-                var body = resp.body() != null ? resp.body().string() : "";
+                String body = resp.body() != null ? resp.body().string() : "";
                 throw new DeployException(
                     "Jenkins trigger failed: HTTP " + resp.code() + " — " + body, ErrorCode.NETWORK);
             }
-            var location = resp.header("Location");
+            String location = resp.header("Location");
             if (location == null || location.isBlank()) {
                 throw new DeployException(
                     "Jenkins did not return a Location header for the queue item", ErrorCode.NETWORK);
@@ -113,14 +104,47 @@ public class JenkinsService {
     }
 
     /**
+     * Returns the git_branch parameter value from the last successful build of the given job.
+     * Returns Optional.empty() if the job has no successful builds, the job path doesn't exist,
+     * or the git_branch parameter isn't present. Never throws — callers treat this as advisory.
+     */
+    public Optional<String> getLastDeployedBranch(String jobPath) {
+        String urlPath = "/job/" + jobPath.replace("/", "/job/");
+        String url = jenkinsBase() + urlPath
+                     + "/lastSuccessfulBuild/api/json?tree=actions[parameters[name,value]]";
+
+        Request req = authed().url(url).build();
+        try (Response resp = client.newCall(req).execute()) {
+            if (!resp.isSuccessful()) return Optional.empty();
+            JsonNode root = mapper.readTree(resp.body().string());
+            JsonNode actions = root.path("actions");
+            if (!actions.isArray()) return Optional.empty();
+            for (JsonNode action : actions) {
+                JsonNode params = action.path("parameters");
+                if (!params.isArray()) continue;
+                for (JsonNode param : params) {
+                    if ("git_branch".equals(param.path("name").asText(null))) {
+                        String value = param.path("value").asText(null);
+                        if (value != null && !value.isBlank()) return Optional.of(value);
+                    }
+                }
+            }
+            return Optional.empty();
+        } catch (IOException e) {
+            log.warn("getLastDeployedBranch failed for {}: {}", jobPath, e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
      * Polls the queue item. Returns null if still queued, or the build URL once assigned.
      */
     public String pollQueueItem(String queueItemUrl) {
-        var req = authed().url(queueItemUrl + "api/json").build();
-        try (var resp = client.newCall(req).execute()) {
+        Request req = authed().url(queueItemUrl + "api/json").build();
+        try (Response resp = client.newCall(req).execute()) {
             if (!resp.isSuccessful()) return null;
             JsonNode node = mapper.readTree(resp.body().string());
-            var url = node.path("executable").path("url");
+            JsonNode url = node.path("executable").path("url");
             return url.isMissingNode() || url.isNull() ? null : url.asText(null);
         } catch (IOException e) {
             log.warn("Poll queue item error (non-fatal): {}", e.getMessage());
@@ -134,15 +158,15 @@ public class JenkinsService {
      * Polls the build. Returns result=null while still running, or the Jenkins result string when done.
      */
     public BuildStatus pollBuildStatus(String buildUrl) {
-        var req = authed().url(buildUrl + "api/json").build();
-        try (var resp = client.newCall(req).execute()) {
+        Request req = authed().url(buildUrl + "api/json").build();
+        try (Response resp = client.newCall(req).execute()) {
             if (!resp.isSuccessful()) {
                 throw new DeployException(
                     "Build status poll failed: HTTP " + resp.code(), ErrorCode.NETWORK);
             }
-            JsonNode node   = mapper.readTree(resp.body().string());
-            var result      = node.path("result").isNull() ? null : node.path("result").asText(null);
-            var number      = node.path("number").asInt(0);
+            JsonNode node = mapper.readTree(resp.body().string());
+            String result = node.path("result").isNull() ? null : node.path("result").asText(null);
+            int number    = node.path("number").asInt(0);
             return new BuildStatus(result, number);
         } catch (DeployException e) {
             throw e;
@@ -157,19 +181,17 @@ public class JenkinsService {
      * Fetches progressive build log starting at 'start' offset.
      */
     public LogFragment getBuildLog(String buildUrl, int start) {
-        var req = authed()
+        Request req = authed()
             .url(buildUrl + "logText/progressiveText?start=" + start)
             .build();
-        try (var resp = client.newCall(req).execute()) {
-            var text     = resp.body() != null ? resp.body().string() : "";
-            var nextSize = Integer.parseInt(resp.header("X-Text-Size", "0"));
-            var hasMore  = "true".equalsIgnoreCase(resp.header("X-More-Data", "false"));
-            return new LogFragment(text, nextSize, hasMore);
+        try (Response resp = client.newCall(req).execute()) {
+            String text    = resp.body() != null ? resp.body().string() : "";
+            int nextStart  = Integer.parseInt(resp.header("X-Text-Size", "0"));
+            boolean hasMore = "true".equalsIgnoreCase(resp.header("X-More-Data", "false"));
+            return new LogFragment(text, nextStart, hasMore);
         } catch (IOException e) {
             log.warn("Build log fetch error (non-fatal): {}", e.getMessage());
             return new LogFragment("", 0, false);
         }
     }
-
 }
-

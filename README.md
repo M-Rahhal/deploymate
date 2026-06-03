@@ -25,7 +25,7 @@ You open the app, describe every service and SDK that belongs to a deployment, a
 
 - **Merges** your feature branch into the target branch on GitHub and writes a structured commit message that includes the Jira ticket number.
 - **Creates a pre-release tag** on GitHub (for services — not SDKs) and publishes a draft pre-release so there is a permanent record of what was deployed.
-- **Triggers a Jenkins pipeline** with the right parameter — `TAG=<tagName>` for services, `BRANCH=<targetBranch>` for SDKs — and polls it every few seconds until the build finishes.
+- **Triggers a Jenkins pipeline** with a single `git_branch` parameter — set to the pre-release tag name for services, or `origin/<targetBranch>` for SDKs — and polls it every few seconds until the build finishes.
 - **Posts Jira comments** at every milestone (merge done, tag created, build started, build passed/failed, conflict detected).
 
 Everything runs in the correct order: SDK Stage 1 finishes before SDK Stage 2 starts, all SDKs must be done before services begin. Within a single stage, all repos run in parallel.
@@ -84,13 +84,23 @@ git clone <your-repo-url> deploymate
 cd deploymate
 ```
 
-### Step 2 — Create your `.env` file
+### Step 2 — Create the database data directory
+
+PostgreSQL stores its data on your local filesystem so it survives container recreations. Create the directory before the first `docker compose up`:
+
+```bash
+mkdir -p ~/Documents/data/deploymate/postgres
+```
+
+### Step 3 — Create your `.env` file
 
 ```bash
 cp .env.example .env
 ```
 
 Open `.env` in any text editor and fill in your credentials. See [Section 5](#5-environment-file--all-properties-explained) for a full explanation of every property.
+
+> The `DATABASE_USER` and `DATABASE_PASSWORD` values in `.env` are already set with safe defaults. Change them if you want a custom database password.
 
 ```
 GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
@@ -107,7 +117,7 @@ TAG_PREFIX=env-stag
 
 > ⚠️ The `.env` file is in `.gitignore`. It will never be committed. Never put credentials anywhere else.
 
-### Step 3 — Build and start
+### Step 4 — Build and start
 
 ```bash
 docker compose up --build
@@ -124,7 +134,7 @@ The first build takes a few minutes (it downloads Node modules and Maven depende
  ✔ Container deploymate  Started
 ```
 
-### Step 4 — Open the app
+### Step 5 — Open the app
 
 ```
 http://localhost:8080
@@ -315,7 +325,7 @@ All `/api/*` requests from the browser are automatically proxied to `http://loca
 
 Tests run against the **backend only**. The frontend has TypeScript type checking.
 
-### Backend tests (73 tests)
+### Backend tests (109 tests)
 
 ```bash
 cd backend
@@ -323,13 +333,13 @@ cd backend
 ```
 
 What is tested:
-- **Unit tests** — `GitHubService`, `JenkinsService`, `JiraService`, `OrchestratorService` — all external HTTP calls are intercepted by MockWebServer and never reach real APIs.
-- **Integration tests** — every REST controller (`/api/merge`, `/api/tag`, `/api/pipeline/*`, `/api/jira/comment`, `/api/deploy/all`, `/api/log`) tested with MockMvc, including validation edge cases like missing bodies, blank fields, and path-traversal attempts.
+- **Unit tests** — `GitHubService`, `JenkinsService`, `JiraService`, `OrchestratorService`, `TagGeneratorService` — all external HTTP calls are intercepted by MockWebServer and never reach real APIs.
+- **Integration tests** — every REST controller (`/api/merge`, `/api/tag`, `/api/pipeline/*`, `/api/jira/comment`, `/api/deploy/all`, `/api/jenkins/*`, `/api/log`) tested with MockMvc, including validation edge cases like missing bodies, blank fields, and path-traversal attempts.
 
 Expected output:
 
 ```
-[INFO] Tests run: 73, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Tests run: 109, Failures: 0, Errors: 0, Skipped: 0
 [INFO] BUILD SUCCESS
 ```
 
@@ -406,15 +416,22 @@ Once registered, Claude can use these tools:
 
 | Tool | What it does |
 |------|-------------|
-| `deploy_sdk` | Merge a branch and trigger Jenkins for an SDK |
-| `deploy_service` | Merge + create a tag + trigger Jenkins for a service |
-| `deploy_all` | Submit a full batch deployment to the backend orchestrator |
-| `get_pipeline_status` | Poll a Jenkins queue item or build URL |
+| `merge_branch` | Verify a branch exists on GitHub and merge it into the target branch |
+| `create_tag` | Create a GitHub pre-release tag from the HEAD of the target branch |
+| `trigger_pipeline` | Trigger a Jenkins build — SERVICE: passes the tag name; SDK: passes `origin/<branch>` |
+| `get_pipeline_status` | Poll a Jenkins queue item or build URL for current status |
+| `get_next_tag` | Get the suggested next tag (from GitHub releases) and the last deployed tag (from Jenkins) |
+| `get_jenkins_categories` | List saved Jenkins job category prefixes |
 | `add_jira_comment` | Post a comment to a Jira issue |
-| `get_log` | Fetch recent log lines, optionally filtered by service name |
+| `get_log` | Fetch recent log lines from the server, optionally filtered by service name |
+| `deploy_all` | Submit a full batch deployment to the backend orchestrator (stage-ordered, parallel within stage) |
+
+The `git_branch` Jenkins parameter strategy, enforced by the backend:
+- **SERVICE rows** → `git_branch = <tagName>` (the pre-release tag; must be set before triggering)
+- **SDK rows** → `git_branch = origin/<targetBranch>` (branch ref)
 
 Example prompt to Claude:
-> *"Deploy the payment-service from feature/PROJ-123-new-checkout to env/staging using Jenkins job backend/payment-deploy. Tag it as env-stag-20240601-payment-service-001. Ticket is PROJ-123."*
+> *"Deploy the payment-service from feature/PROJ-123-new-checkout to env/staging using Jenkins job team/staging/payment-service. Ticket is PROJ-123."*
 
 ---
 
@@ -446,7 +463,7 @@ deploymate/
 │       │   └── resources/
 │       │       ├── application.yml   ← Reads all env vars; log file config
 │       │       └── static/           ← Frontend build output lands here (git-ignored)
-│       └── test/                 73 unit + integration tests
+│       └── test/                 109 unit + integration tests
 │
 ├── frontend/                 ← React 19, Vite 6, TypeScript 5, Tailwind CSS
 │   ├── package.json
@@ -460,7 +477,7 @@ deploymate/
 ├── mcp/                      ← MCP stdio server (Node.js + TypeScript)
 │   ├── package.json
 │   ├── tsconfig.json
-│   └── server.ts             ← 6 tools; rate limiter; credential sanitizer
+│   └── server.ts             ← 9 tools; rate limiter; credential sanitizer
 │
 ├── scripts/
 │   └── smoke-test.sh         ← 18 checks against a live server
@@ -538,10 +555,9 @@ Check the `Jenkins job` field in the UI. The format must match the job's full pa
 
 ### I want to run only the pipeline — no merge, no tag
 
-Turn on the **Skip merge** toggle for that row. When enabled:
-- The merge and tag steps are immediately marked **Skipped** (not attempted).
-- The pipeline is triggered with `BRANCH=<targetBranch>` instead of `TAG=<tagName>`.
-- The source branch and tag name fields are greyed out.
+Disable the **Merge branch** and **Create tag** step toggles for that row. The pipeline always uses:
+- **SERVICE rows**: `git_branch = <tagName>` — the tag name field must be filled in manually if you skip the create-tag step.
+- **SDK rows**: `git_branch = origin/<targetBranch>` — no tag is ever needed.
 
 ---
 

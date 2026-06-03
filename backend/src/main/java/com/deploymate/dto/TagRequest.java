@@ -6,10 +6,6 @@ import jakarta.validation.constraints.Pattern;
 public record TagRequest(
     @NotBlank
     @Pattern(regexp = "^[a-zA-Z0-9_.-]{1,100}$")
-    String org,
-
-    @NotBlank
-    @Pattern(regexp = "^[a-zA-Z0-9_.-]{1,100}$")
     String repo,
 
     @NotBlank

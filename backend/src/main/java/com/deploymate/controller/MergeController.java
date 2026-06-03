@@ -6,22 +6,18 @@ import com.deploymate.service.GitHubService;
 import com.deploymate.service.JiraService;
 import com.deploymate.service.LogService;
 import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/api/merge")
+@RequiredArgsConstructor
 public class MergeController {
 
     private final GitHubService github;
     private final JiraService   jira;
     private final LogService    logSvc;
-
-    public MergeController(GitHubService github, JiraService jira, LogService logSvc) {
-        this.github = github;
-        this.jira   = jira;
-        this.logSvc = logSvc;
-    }
 
     @PostMapping
     public ResponseEntity<MergeResponse> merge(@Valid @RequestBody MergeRequest req) {
@@ -35,7 +31,7 @@ public class MergeController {
                     "Branch \"" + req.sourceBranch() + "\" not found on GitHub"));
         }
 
-        var result = github.mergeBranch(
+        GitHubService.MergeResult result = github.mergeBranch(
             req.repo(), req.sourceBranch(), req.targetBranch(), req.ticket());
 
         if (result.conflict()) {
@@ -44,7 +40,7 @@ public class MergeController {
                 .body(new MergeResponse(false, true, null, "Merge conflict detected"));
         }
 
-        var sha = result.sha() != null && result.sha().length() >= 7
+        String sha = result.sha() != null && result.sha().length() >= 7
             ? result.sha().substring(0, 7) : result.sha();
         logSvc.info(req.repo(), "merge", "Merge successful (SHA: " + sha + ")");
         return ResponseEntity.ok(new MergeResponse(true, false, result.sha(), "Merge successful"));

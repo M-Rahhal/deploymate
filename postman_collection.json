@@ -1,0 +1,467 @@
+{
+  "info": {
+    "name": "DeployMate API",
+    "description": "Complete collection for the DeployMate backend REST API (http://localhost:8080).\n\nEndpoints:\n  POST /api/merge                        — Verify branch + merge source → target\n  POST /api/tag                          — Create GitHub pre-release tag\n  GET  /api/tag/next?repo=               — Suggest next tag name based on last release\n  POST /api/pipeline/trigger             — Trigger Jenkins (git_branch param)\n  GET  /api/pipeline/status              — Poll Jenkins build status\n  POST /api/jira/comment                 — Post ADF comment to Jira\n  POST /api/deploy/all                   — Submit a full stage-ordered deployment batch\n  GET  /api/log?lines=                   — Tail the deployment log\n  GET  /api/jenkins/categories           — List saved Jenkins categories\n  POST /api/jenkins/categories           — Save a Jenkins category\n  GET  /api/jenkins/service-names        — List saved service names for a category\n  POST /api/jenkins/service-names        — Save a service name under a category",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8080",
+      "type": "string"
+    },
+    {
+      "key": "org",
+      "value": "my-org",
+      "type": "string"
+    },
+    {
+      "key": "repo",
+      "value": "payment-service",
+      "type": "string"
+    },
+    {
+      "key": "ticket",
+      "value": "PROJ-123",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Merge",
+      "item": [
+        {
+          "name": "Merge branch (success)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/merge", "host": ["{{base_url}}"], "path": ["api", "merge"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"org\": \"{{org}}\",\n  \"repo\": \"{{repo}}\",\n  \"sourceBranch\": \"feature/PROJ-123\",\n  \"targetBranch\": \"env/staging\",\n  \"ticket\": \"{{ticket}}\"\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "201 Merge successful",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"success\": true,\n  \"conflict\": false,\n  \"sha\": \"abc1234567890abcdef\",\n  \"message\": \"Merge successful\"\n}"
+            },
+            {
+              "name": "409 Merge conflict",
+              "status": "Conflict",
+              "code": 409,
+              "body": "{\n  \"success\": false,\n  \"conflict\": true,\n  \"sha\": null,\n  \"message\": \"Merge conflict detected\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Merge branch (validation error — blank repo)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/merge", "host": ["{{base_url}}"], "path": ["api", "merge"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"org\": \"my-org\",\n  \"repo\": \"\",\n  \"sourceBranch\": \"feature/test\",\n  \"targetBranch\": \"env/staging\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Merge branch (validation error — path traversal)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/merge", "host": ["{{base_url}}"], "path": ["api", "merge"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"org\": \"my-org\",\n  \"repo\": \"../../../etc/passwd\",\n  \"sourceBranch\": \"feature/test\",\n  \"targetBranch\": \"env/staging\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Tag",
+      "item": [
+        {
+          "name": "Get next tag suggestion",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/tag/next?repo={{repo}}",
+              "host": ["{{base_url}}"],
+              "path": ["api", "tag", "next"],
+              "query": [{ "key": "repo", "value": "{{repo}}" }]
+            }
+          },
+          "response": [
+            {
+              "name": "200 Next tag computed",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"tagName\": \"v1.0.0rc2\",\n  \"previousTag\": \"v1.0.0rc1\"\n}"
+            },
+            {
+              "name": "200 No prior releases (returns default)",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"tagName\": \"v1.0.0rc1\",\n  \"previousTag\": \"\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Create pre-release tag",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/tag", "host": ["{{base_url}}"], "path": ["api", "tag"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"org\": \"{{org}}\",\n  \"repo\": \"{{repo}}\",\n  \"tagName\": \"v1.0.0rc1\",\n  \"targetBranch\": \"env/staging\",\n  \"ticket\": \"{{ticket}}\"\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "200 Tag created",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"success\": true,\n  \"tagName\": \"v1.0.0rc1\",\n  \"sha\": \"deadbeef1234\",\n  \"releaseUrl\": \"https://github.com/my-org/payment-service/releases/tag/v1.0.0rc1\",\n  \"message\": \"Tag created\"\n}"
+            },
+            {
+              "name": "400 Tag already exists",
+              "status": "Bad Request",
+              "code": 400,
+              "body": "{\n  \"error\": \"INVALID_INPUT\",\n  \"message\": \"Tag \\\"v1.0.0rc1\\\" already exists in payment-service. Choose a different tag name.\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Create tag (validation — invalid chars in tagName)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/tag", "host": ["{{base_url}}"], "path": ["api", "tag"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"org\": \"my-org\",\n  \"repo\": \"my-repo\",\n  \"tagName\": \"tag with spaces!\",\n  \"targetBranch\": \"env/staging\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Pipeline",
+      "item": [
+        {
+          "name": "Trigger pipeline (SDK — branch param)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/pipeline/trigger", "host": ["{{base_url}}"], "path": ["api", "pipeline", "trigger"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jenkinsJob\": \"cross-products/dev/my-sdk\",\n  \"gitBranch\": \"origin/env/staging\"\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "200 Build queued",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"success\": true,\n  \"queueItemUrl\": \"http://jenkins.example.com/queue/item/42/\",\n  \"message\": \"Build queued\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Trigger pipeline (SERVICE — tag param)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/pipeline/trigger", "host": ["{{base_url}}"], "path": ["api", "pipeline", "trigger"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jenkinsJob\": \"cross-products/staging/payment-service\",\n  \"gitBranch\": \"v1.0.0rc2\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Poll pipeline status (queue item)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/pipeline/status?queueItemUrl=http://jenkins.example.com/queue/item/42/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "pipeline", "status"],
+              "query": [{ "key": "queueItemUrl", "value": "http://jenkins.example.com/queue/item/42/" }]
+            }
+          },
+          "response": [
+            {
+              "name": "200 Still queued",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"state\": \"QUEUED\",\n  \"buildUrl\": null,\n  \"buildNumber\": null,\n  \"logFragment\": null,\n  \"message\": \"Still queued\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Poll pipeline status (build URL)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/pipeline/status?buildUrl=http://jenkins.example.com/job/cross-products/job/staging/job/payment-service/42/",
+              "host": ["{{base_url}}"],
+              "path": ["api", "pipeline", "status"],
+              "query": [{ "key": "buildUrl", "value": "http://jenkins.example.com/job/cross-products/job/staging/job/payment-service/42/" }]
+            }
+          },
+          "response": [
+            {
+              "name": "200 Running",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"state\": \"RUNNING\",\n  \"buildUrl\": \"http://jenkins.example.com/job/cross-products/job/staging/job/payment-service/42/\",\n  \"buildNumber\": 42,\n  \"logFragment\": \"... last 4000 chars of log ...\",\n  \"message\": \"RUNNING\"\n}"
+            },
+            {
+              "name": "200 Success",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"state\": \"SUCCESS\",\n  \"buildUrl\": \"http://jenkins.example.com/job/.../42/\",\n  \"buildNumber\": 42,\n  \"logFragment\": \"Finished: SUCCESS\",\n  \"message\": \"SUCCESS\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Trigger (validation — invalid job path chars)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/pipeline/trigger", "host": ["{{base_url}}"], "path": ["api", "pipeline", "trigger"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"jenkinsJob\": \"../../etc/passwd\",\n  \"gitBranch\": \"origin/main\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Jira",
+      "item": [
+        {
+          "name": "Post Jira comment",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/jira/comment", "host": ["{{base_url}}"], "path": ["api", "jira", "comment"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"issueKey\": \"{{ticket}}\",\n  \"text\": \"🚀 Deployment started for payment-service (v1.0.0rc2) on staging.\"\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "200 Comment posted",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"success\": true,\n  \"message\": \"Comment posted\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Post comment (validation — invalid issueKey)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/jira/comment", "host": ["{{base_url}}"], "path": ["api", "jira", "comment"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"issueKey\": \"not-a-valid-key\",\n  \"text\": \"test\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Deploy All",
+      "item": [
+        {
+          "name": "Deploy all — full batch (SDK + SERVICE)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/deploy/all", "host": ["{{base_url}}"], "path": ["api", "deploy", "all"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"ticket\": \"{{ticket}}\",\n  \"rows\": [\n    {\n      \"id\": \"row-sdk-001\",\n      \"name\": \"Auth SDK\",\n      \"repo\": \"auth-sdk\",\n      \"type\": \"SDK\",\n      \"stage\": 1,\n      \"sourceBranch\": \"feature/PROJ-123\",\n      \"targetBranch\": \"env/staging\",\n      \"jenkinsJob\": \"cross-products/dev/auth-sdk\",\n      \"tagName\": \"\",\n      \"steps\": {\n        \"mergeBranch\": true,\n        \"createTag\": false,\n        \"triggerPipeline\": true,\n        \"updateJira\": true\n      }\n    },\n    {\n      \"id\": \"row-svc-001\",\n      \"name\": \"Payment Service\",\n      \"repo\": \"payment-service\",\n      \"type\": \"SERVICE\",\n      \"stage\": 2,\n      \"sourceBranch\": \"feature/PROJ-123\",\n      \"targetBranch\": \"env/staging\",\n      \"jenkinsJob\": \"cross-products/staging/payment-service\",\n      \"tagName\": \"v1.0.0rc2\",\n      \"steps\": {\n        \"mergeBranch\": true,\n        \"createTag\": true,\n        \"triggerPipeline\": true,\n        \"updateJira\": true\n      }\n    }\n  ]\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "202 Deploy started",
+              "status": "Accepted",
+              "code": 202,
+              "body": "{\n  \"message\": \"Deploy All started\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "Deploy all — only pipeline step",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/deploy/all", "host": ["{{base_url}}"], "path": ["api", "deploy", "all"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"ticket\": \"\",\n  \"rows\": [\n    {\n      \"id\": \"row-001\",\n      \"name\": \"My Service\",\n      \"repo\": \"my-service\",\n      \"type\": \"SERVICE\",\n      \"stage\": 1,\n      \"sourceBranch\": \"main\",\n      \"targetBranch\": \"env/staging\",\n      \"jenkinsJob\": \"cross-products/staging/my-service\",\n      \"tagName\": \"v2.0.0rc1\",\n      \"steps\": {\n        \"mergeBranch\": false,\n        \"createTag\": false,\n        \"triggerPipeline\": true,\n        \"updateJira\": false\n      }\n    }\n  ]\n}"
+            }
+          }
+        },
+        {
+          "name": "Deploy all — validation error (empty rows)",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/deploy/all", "host": ["{{base_url}}"], "path": ["api", "deploy", "all"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"ticket\": \"PROJ-123\",\n  \"rows\": []\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Log",
+      "item": [
+        {
+          "name": "Get last 50 log lines",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/log?lines=50",
+              "host": ["{{base_url}}"],
+              "path": ["api", "log"],
+              "query": [{ "key": "lines", "value": "50" }]
+            }
+          },
+          "response": [
+            {
+              "name": "200 Log lines array",
+              "status": "OK",
+              "code": 200,
+              "body": "[\n  \"[2026-05-31T10:00:00.000Z] [INFO   ] [payment-service     ] [Stage 2  ] Merging feature/PROJ-123 → env/staging\",\n  \"[2026-05-31T10:00:05.000Z] [INFO   ] [payment-service     ] [Stage 2  ] Merge successful (SHA: abc1234)\"\n]"
+            }
+          ]
+        },
+        {
+          "name": "Get last 200 log lines (default)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/log",
+              "host": ["{{base_url}}"],
+              "path": ["api", "log"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Jenkins Config",
+      "item": [
+        {
+          "name": "List categories",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/jenkins/categories",
+              "host": ["{{base_url}}"],
+              "path": ["api", "jenkins", "categories"]
+            }
+          },
+          "response": [
+            {
+              "name": "200 Categories list",
+              "status": "OK",
+              "code": 200,
+              "body": "[\"cross-products\", \"platform\", \"data-services\"]"
+            }
+          ]
+        },
+        {
+          "name": "Save category",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/jenkins/categories", "host": ["{{base_url}}"], "path": ["api", "jenkins", "categories"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"cross-products\"\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "200 Category saved (idempotent)",
+              "status": "OK",
+              "code": 200,
+              "body": "{\n  \"name\": \"cross-products\"\n}"
+            }
+          ]
+        },
+        {
+          "name": "List service names for category",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/jenkins/service-names?category=cross-products",
+              "host": ["{{base_url}}"],
+              "path": ["api", "jenkins", "service-names"],
+              "query": [{ "key": "category", "value": "cross-products" }]
+            }
+          },
+          "response": [
+            {
+              "name": "200 Service names list",
+              "status": "OK",
+              "code": 200,
+              "body": "[\"auth-service\", \"payment-eligibility-service\", \"user-service\"]"
+            }
+          ]
+        },
+        {
+          "name": "Save service name under category",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/jenkins/service-names", "host": ["{{base_url}}"], "path": ["api", "jenkins", "service-names"] },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"category\": \"cross-products\",\n  \"name\": \"payment-eligibility-service\"\n}"
+            }
+          },
+          "response": [
+            {
+              "name": "200 Saved (idempotent)",
+              "status": "OK",
+              "code": 200,
+              "body": ""
+            }
+          ]
+        },
+        {
+          "name": "List service names (validation — missing category)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{base_url}}/api/jenkins/service-names",
+              "host": ["{{base_url}}"],
+              "path": ["api", "jenkins", "service-names"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

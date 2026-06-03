@@ -7,30 +7,26 @@ import com.deploymate.dto.PipelineTriggerResponse;
 import com.deploymate.service.JenkinsService;
 import com.deploymate.service.LogService;
 import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
 @RequestMapping("/api/pipeline")
+@RequiredArgsConstructor
 public class PipelineController {
 
     private final JenkinsService jenkins;
     private final LogService     logSvc;
-
-    public PipelineController(JenkinsService jenkins, LogService logSvc) {
-        this.jenkins = jenkins;
-        this.logSvc  = logSvc;
-    }
 
     @PostMapping("/trigger")
     public ResponseEntity<PipelineTriggerResponse> trigger(
         @Valid @RequestBody PipelineTriggerRequest req
     ) {
         logSvc.info(req.jenkinsJob(), "pipeline",
-            "Triggering with " + req.paramType() + "=" + req.paramValue());
+            "Triggering with git_branch=" + req.gitBranch());
 
-        var queueUrl = jenkins.triggerBuild(
-            req.jenkinsJob(), req.paramType().name(), req.paramValue());
+        String queueUrl = jenkins.triggerBuild(req.jenkinsJob(), req.gitBranch());
 
         logSvc.info(req.jenkinsJob(), "pipeline", "Queued at: " + queueUrl);
         return ResponseEntity.ok(new PipelineTriggerResponse(true, queueUrl, "Build queued"));
@@ -42,7 +38,7 @@ public class PipelineController {
         @RequestParam(required = false) String buildUrl
     ) {
         if (queueItemUrl != null && !queueItemUrl.isBlank()) {
-            var polledBuildUrl = jenkins.pollQueueItem(queueItemUrl);
+            String polledBuildUrl = jenkins.pollQueueItem(queueItemUrl);
             if (polledBuildUrl == null) {
                 return ResponseEntity.ok(
                     new PipelineStatusResponse(BuildState.QUEUED, null, null, null, "Still queued"));
@@ -56,11 +52,11 @@ public class PipelineController {
                     "Provide queueItemUrl or buildUrl"));
         }
 
-        var status = jenkins.pollBuildStatus(buildUrl);
-        var log    = jenkins.getBuildLog(buildUrl, 0);
-        var frag   = truncateTail(log.text(), 4000);
+        JenkinsService.BuildStatus status     = jenkins.pollBuildStatus(buildUrl);
+        JenkinsService.LogFragment logFragment = jenkins.getBuildLog(buildUrl, 0);
+        String frag = truncateTail(logFragment.text(), 4000);
 
-        var state = mapResult(status.result());
+        BuildState state = mapResult(status.result());
         return ResponseEntity.ok(
             new PipelineStatusResponse(state, buildUrl, status.number(), frag, state.name()));
     }

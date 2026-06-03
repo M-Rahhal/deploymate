@@ -6,15 +6,15 @@ import type { ServiceRow } from '@/types';
 
 interface ConflictPanelProps {
   row: ServiceRow;
-  org: string;
 }
 
-export function ConflictPanel({ row, org }: ConflictPanelProps) {
+export function ConflictPanel({ row }: ConflictPanelProps) {
   const resetRow      = useDeployStore((s) => s.resetRow);
-  const { run, running } = useMergeAction(row, org);
+  const { run, running } = useMergeAction(row);
 
   if (row.mergeState !== 'CONFLICT') return null;
 
+  const org = ((window as unknown) as Record<string, unknown>)['__ORG__'] as string | undefined ?? '';
   const compareUrl = `https://github.com/${org}/${row.repo}/compare/${row.targetBranch}...${row.sourceBranch}`;
 
   return (

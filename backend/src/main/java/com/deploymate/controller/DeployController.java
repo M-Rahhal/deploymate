@@ -1,30 +1,25 @@
 package com.deploymate.controller;
 
 import com.deploymate.dto.DeployAllRequest;
+import com.deploymate.service.LogService;
 import com.deploymate.service.OrchestratorService;
 import com.deploymate.service.OrchestratorService.StepCallback;
-import com.deploymate.service.LogService;
 import jakarta.validation.Valid;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
 
+@Slf4j
 @RestController
 @RequestMapping("/api/deploy")
+@RequiredArgsConstructor
 public class DeployController {
-
-    private static final Logger log = LoggerFactory.getLogger(DeployController.class);
 
     private final OrchestratorService orchestrator;
     private final LogService          logSvc;
-
-    public DeployController(OrchestratorService orchestrator, LogService logSvc) {
-        this.orchestrator = orchestrator;
-        this.logSvc       = logSvc;
-    }
 
     /**
      * Launches Deploy All in a virtual thread (Java 21) so the HTTP response returns
@@ -46,7 +41,7 @@ public class DeployController {
         });
 
         return ResponseEntity.accepted().body(Map.of(
-            "message", "Deploy All started",
+            "message",  "Deploy All started",
             "services", String.valueOf(req.rows().size())
         ));
     }

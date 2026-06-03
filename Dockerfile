@@ -61,10 +61,11 @@ RUN mkdir -p logs && chown deploy:deploy logs
 
 USER deploy
 
-EXPOSE 8080
+EXPOSE 8080 5005
 
 # Use exec form so signals reach the JVM
 ENTRYPOINT ["java", \
+  "-agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=*:5005", \
   "-XX:+UseZGC", \
   "-XX:+ZGenerational", \
   "-Xmx512m", \

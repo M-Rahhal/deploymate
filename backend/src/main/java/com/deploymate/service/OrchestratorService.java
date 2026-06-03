@@ -1,32 +1,26 @@
 package com.deploymate.service;
 
 import com.deploymate.dto.ServiceRowDto;
-import com.deploymate.dto.ServiceRowDto.ServiceType;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
-import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.stream.Collectors;
 
+@Slf4j
 @Service
+@RequiredArgsConstructor
 public class OrchestratorService {
-
-    private static final Logger log = LoggerFactory.getLogger(OrchestratorService.class);
 
     private final GitHubService  github;
     private final JenkinsService jenkins;
     private final JiraService    jira;
     private final LogService     logSvc;
 
-    /**
-     * Callback interface so the orchestrator can push step state changes
-     * to whatever layer is listening (controller, SSE stream, etc.).
-     */
     public interface StepCallback {
         void onMergeState(String id, String state, String sha,        String errorMessage);
         void onTagState  (String id, String state, String releaseUrl, String errorMessage);
@@ -34,27 +28,14 @@ public class OrchestratorService {
         void onLog(String level, String service, String stage, String message);
     }
 
-    public OrchestratorService(GitHubService github, JenkinsService jenkins,
-                                JiraService jira, LogService logSvc) {
-        this.github  = github;
-        this.jenkins = jenkins;
-        this.jira    = jira;
-        this.logSvc  = logSvc;
-    }
-
     // ─────────────────────────────────────────────────────────────────────────
     // STEP 1 — Merge
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Merges sourceBranch into targetBranch.
-     * When skipMerge=true, marks the step as SKIPPED immediately.
-     * Returns true on success/skip, false on conflict or failure.
-     */
     public boolean mergeOnly(ServiceRowDto row, String ticket, String stageLabel, StepCallback cb) {
-        if (row.skipMerge()) {
+        if (!row.steps().mergeBranch()) {
             cb.onMergeState(row.id(), "SKIPPED", null, null);
-            cb.onLog("INFO", row.name(), stageLabel, "Merge skipped (skipMerge=true)");
+            cb.onLog("INFO", row.name(), stageLabel, "Merge skipped (not configured)");
             return true;
         }
 
@@ -71,7 +52,7 @@ public class OrchestratorService {
         cb.onLog("INFO", row.name(), stageLabel,
             "Merging " + row.sourceBranch() + " → " + row.targetBranch());
 
-        var result = github.mergeBranch(row.repo(), row.sourceBranch(), row.targetBranch(), ticket);
+        GitHubService.MergeResult result = github.mergeBranch(row.repo(), row.sourceBranch(), row.targetBranch(), ticket);
 
         if (result.conflict()) {
             cb.onMergeState(row.id(), "CONFLICT", null, "Merge conflict. Resolve manually and retry.");
@@ -83,7 +64,7 @@ public class OrchestratorService {
         }
 
         cb.onMergeState(row.id(), "DONE", result.sha(), null);
-        var sha = shortSha(result.sha());
+        String sha = shortSha(result.sha());
         cb.onLog("INFO", row.name(), stageLabel, "Merge successful (SHA: " + sha + ")");
         postJiraComment(row, ticket,
             "🔀 `" + row.repo() + "` merged `" + row.sourceBranch()
@@ -92,19 +73,12 @@ public class OrchestratorService {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // STEP 2 — Tag (SERVICE type, skipMerge=false only)
+    // STEP 2 — Tag
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Creates a pre-release tag from the HEAD of targetBranch.
-     * Skipped automatically when type != SERVICE or skipMerge=true.
-     */
     public boolean tagOnly(ServiceRowDto row, String ticket, String stageLabel, StepCallback cb) {
-        if (row.type() != ServiceType.SERVICE || row.skipMerge()) {
+        if (!row.steps().createTag()) {
             cb.onTagState(row.id(), "SKIPPED", null, null);
-            if (row.type() == ServiceType.SERVICE && row.skipMerge()) {
-                cb.onLog("INFO", row.name(), stageLabel, "Tag skipped (skipMerge=true)");
-            }
             return true;
         }
 
@@ -113,10 +87,10 @@ public class OrchestratorService {
             "Getting HEAD SHA of " + row.targetBranch() + "...");
 
         try {
-            var sha = github.getBranchSha(row.repo(), row.targetBranch());
+            String sha = github.getBranchSha(row.repo(), row.targetBranch());
             cb.onLog("INFO", row.name(), stageLabel, "Creating pre-release tag: " + row.tagName());
 
-            var result = github.createTagAndPreRelease(row.repo(), row.tagName(), sha, ticket);
+            GitHubService.TagResult result = github.createTagAndPreRelease(row.repo(), row.tagName(), sha, ticket);
             cb.onTagState(row.id(), "DONE", result.releaseUrl(), null);
             cb.onLog("INFO", row.name(), stageLabel,
                 "Tag " + row.tagName() + " created — " + result.releaseUrl());
@@ -136,31 +110,39 @@ public class OrchestratorService {
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
-     * Triggers Jenkins and polls until the build completes.
-     *
-     * Parameter strategy:
-     *   SDK  (any skipMerge)     → BRANCH=targetBranch
-     *   SERVICE skipMerge=false  → TAG=tagName
-     *   SERVICE skipMerge=true   → BRANCH=targetBranch
+     * git_branch parameter strategy (determined by row type):
+     *   SERVICE → git_branch = tagName  (deploy from a pre-release tag; tagName must be set)
+     *   SDK     → git_branch = "origin/" + targetBranch  (build from branch)
      */
     public boolean pipelineOnly(ServiceRowDto row, String ticket, String stageLabel, StepCallback cb) {
-        var useTag    = row.type() == ServiceType.SERVICE && !row.skipMerge();
-        var paramType = useTag ? "TAG" : "BRANCH";
-        var paramVal  = useTag ? row.tagName() : row.targetBranch();
+        if (!row.steps().triggerPipeline()) {
+            cb.onPipelineState(row.id(), "SKIPPED", null, null, null);
+            cb.onLog("INFO", row.name(), stageLabel, "Pipeline skipped (not configured)");
+            return true;
+        }
 
-        if (paramVal == null || paramVal.isBlank()) {
-            cb.onPipelineState(row.id(), "FAILED", null, null, "Missing " + paramType + " value");
-            cb.onLog("ERROR", row.name(), stageLabel, "Cannot trigger pipeline: " + paramType + " value is empty");
-            return false;
+        // SERVICE always deploys from a tag; SDK always builds from a branch
+        String gitBranch;
+        if (row.type() == ServiceRowDto.ServiceType.SERVICE) {
+            if (row.tagName() == null || row.tagName().isBlank()) {
+                cb.onPipelineState(row.id(), "FAILED", null, null,
+                    "SERVICE rows require a tagName before triggering the pipeline");
+                cb.onLog("ERROR", row.name(), stageLabel,
+                    "Cannot trigger pipeline: tagName is required for SERVICE rows");
+                return false;
+            }
+            gitBranch = row.tagName();
+        } else {
+            gitBranch = "origin/" + row.targetBranch();
         }
 
         cb.onLog("INFO", row.name(), stageLabel,
-            "Triggering Jenkins: " + row.jenkinsJob() + " (" + paramType + "=" + paramVal + ")");
+            "Triggering Jenkins: " + row.jenkinsJob() + " (git_branch=" + gitBranch + ")");
         cb.onPipelineState(row.id(), "RUNNING", null, null, null);
 
         String queueItemUrl;
         try {
-            queueItemUrl = jenkins.triggerBuild(row.jenkinsJob(), paramType, paramVal);
+            queueItemUrl = jenkins.triggerBuild(row.jenkinsJob(), gitBranch);
             cb.onLog("INFO", row.name(), stageLabel, "Build queued — waiting for executor...");
         } catch (Exception e) {
             cb.onPipelineState(row.id(), "FAILED", null, null, e.getMessage());
@@ -168,22 +150,20 @@ public class OrchestratorService {
             return false;
         }
 
-        // Poll until an executor picks up the build
         String buildUrl = null;
         while (buildUrl == null) {
             sleep(3_000);
             buildUrl = jenkins.pollQueueItem(queueItemUrl);
         }
 
-        var status   = jenkins.pollBuildStatus(buildUrl);
-        var buildNum = status.number();
+        JenkinsService.BuildStatus status = jenkins.pollBuildStatus(buildUrl);
+        int buildNum = status.number();
         cb.onPipelineState(row.id(), "RUNNING", buildUrl, buildNum, null);
         cb.onLog("INFO", row.name(), stageLabel,
             "Build #" + buildNum + " running — " + buildUrl);
         postJiraComment(row, ticket,
             "🚀 Jenkins build [#" + buildNum + "](" + buildUrl + ") started for `" + row.repo() + "`");
 
-        // Poll until the build finishes
         String result = null;
         while (result == null) {
             sleep(5_000);
@@ -197,7 +177,7 @@ public class OrchestratorService {
                 "✅ Jenkins build [#" + buildNum + "](" + buildUrl + ") passed for `" + row.repo() + "`");
             return true;
         } else {
-            var msg = "Build #" + buildNum + " result: " + result;
+            String msg = "Build #" + buildNum + " result: " + result;
             cb.onPipelineState(row.id(), "FAILED", buildUrl, buildNum, msg);
             cb.onLog("ERROR", row.name(), stageLabel, "Build #" + buildNum + " " + result + " ❌");
             postJiraComment(row, ticket,
@@ -208,13 +188,9 @@ public class OrchestratorService {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // All Steps convenience wrapper
+    // All Steps — idempotent wrapper
     // ─────────────────────────────────────────────────────────────────────────
 
-    /**
-     * Runs merge → tag → pipeline in sequence, skipping already DONE/SKIPPED steps.
-     * currentXxxState should be the current state of each step from the frontend.
-     */
     public boolean deployAllSteps(ServiceRowDto row, String ticket, String stageLabel,
                                    String currentMergeState, String currentTagState,
                                    String currentPipelineState, StepCallback cb) {
@@ -231,13 +207,13 @@ public class OrchestratorService {
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Deploy All — stage-aware
+    // Deploy All — unified stage-based orchestration
     // ─────────────────────────────────────────────────────────────────────────
 
     /**
      * Deploys all rows in stage order.
-     * SDKs: stage-by-stage, parallel within each stage.
-     * Services: all in parallel after all SDK stages complete.
+     * Rows with the same stage number run in parallel.
+     * A failure in any stage halts execution before the next stage starts.
      */
     public void deployAll(List<ServiceRowDto> rows, String ticket, StepCallback cb) {
         logSvc.info("SYSTEM", "—",
@@ -245,29 +221,21 @@ public class OrchestratorService {
         cb.onLog("INFO", "SYSTEM", "—",
             "Deploy All started" + (ticket != null && !ticket.isBlank() ? " for ticket " + ticket : ""));
 
-        var sdks     = rows.stream()
-            .filter(r -> r.type() == ServiceType.SDK)
-            .sorted(Comparator.comparingInt(ServiceRowDto::stage))
-            .toList();
-        var services = rows.stream()
-            .filter(r -> r.type() == ServiceType.SERVICE)
-            .toList();
-
-        var stages = sdks.stream()
+        List<Integer> stages = rows.stream()
             .map(ServiceRowDto::stage)
             .distinct()
             .sorted()
             .toList();
 
-        for (var stageNum : stages) {
-            var stageRows  = sdks.stream().filter(r -> r.stage() == stageNum).toList();
-            var stageLabel = "Stage " + stageNum;
+        for (int stageNum : stages) {
+            List<ServiceRowDto> stageRows = rows.stream().filter(r -> r.stage() == stageNum).toList();
+            String stageLabel = "Stage " + stageNum;
             cb.onLog("INFO", "SYSTEM", stageLabel,
                 "Starting " + stageLabel + " — "
                 + stageRows.stream().map(ServiceRowDto::name).collect(Collectors.joining(", "))
                 + " (parallel)");
 
-            var allOk = runParallel(stageRows, ticket, stageLabel, cb);
+            boolean allOk = runParallel(stageRows, ticket, stageLabel, cb);
             if (!allOk) {
                 cb.onLog("ERROR", "SYSTEM", stageLabel,
                     stageLabel + " had failures or conflicts. Halting Deploy All.");
@@ -276,12 +244,7 @@ public class OrchestratorService {
             cb.onLog("INFO", "SYSTEM", stageLabel, stageLabel + " complete ✅");
         }
 
-        if (!services.isEmpty()) {
-            cb.onLog("INFO", "SYSTEM", "Services",
-                "All SDK stages done. Starting " + services.size() + " service(s) in parallel...");
-            runParallel(services, ticket, "Service", cb);
-            cb.onLog("INFO", "SYSTEM", "Services", "All services deployment complete.");
-        }
+        cb.onLog("INFO", "SYSTEM", "—", "All stages complete.");
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -295,7 +258,7 @@ public class OrchestratorService {
         }
         ExecutorService executor = Executors.newFixedThreadPool(rows.size());
         try {
-            var futures = rows.stream()
+            List<CompletableFuture<Boolean>> futures = rows.stream()
                 .map(row -> CompletableFuture.supplyAsync(
                     () -> deployAllSteps(row, ticket, stageLabel, "IDLE", "IDLE", "IDLE", cb),
                     executor))
@@ -313,7 +276,7 @@ public class OrchestratorService {
     }
 
     private void postJiraComment(ServiceRowDto row, String ticket, String text) {
-        if (row.updateJira() && ticket != null && !ticket.isBlank()) {
+        if (row.steps().updateJira() && ticket != null && !ticket.isBlank()) {
             try {
                 jira.addComment(ticket, text);
             } catch (Exception e) {

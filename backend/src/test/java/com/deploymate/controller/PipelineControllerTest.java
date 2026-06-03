@@ -32,19 +32,33 @@ class PipelineControllerTest {
 
     @Test
     void trigger_returns200_onSuccess() throws Exception {
-        when(jenkins.triggerBuild("backend/my-job", "BRANCH", "env/staging"))
+        when(jenkins.triggerBuild("backend/my-job", "origin/env/staging"))
             .thenReturn("http://jenkins/queue/item/42/");
 
         mvc.perform(post("/api/pipeline/trigger")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(mapper.writeValueAsString(Map.of(
                     "jenkinsJob", "backend/my-job",
-                    "paramType",  "BRANCH",
-                    "paramValue", "env/staging"
+                    "gitBranch",  "origin/env/staging"
                 ))))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$.success").value(true))
             .andExpect(jsonPath("$.queueItemUrl").value("http://jenkins/queue/item/42/"));
+    }
+
+    @Test
+    void trigger_returns200_withTagParam() throws Exception {
+        when(jenkins.triggerBuild("backend/my-job", "v1.0.0rc2"))
+            .thenReturn("http://jenkins/queue/item/99/");
+
+        mvc.perform(post("/api/pipeline/trigger")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(mapper.writeValueAsString(Map.of(
+                    "jenkinsJob", "backend/my-job",
+                    "gitBranch",  "v1.0.0rc2"
+                ))))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.queueItemUrl").value("http://jenkins/queue/item/99/"));
     }
 
     @Test
@@ -53,19 +67,17 @@ class PipelineControllerTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(mapper.writeValueAsString(Map.of(
                     "jenkinsJob", "",
-                    "paramType",  "BRANCH",
-                    "paramValue", "main"
+                    "gitBranch",  "origin/main"
                 ))))
             .andExpect(status().isBadRequest());
     }
 
     @Test
-    void trigger_returns400_whenParamTypeNull() throws Exception {
+    void trigger_returns400_whenGitBranchMissing() throws Exception {
         mvc.perform(post("/api/pipeline/trigger")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(mapper.writeValueAsString(Map.of(
-                    "jenkinsJob", "backend/job",
-                    "paramValue", "main"
+                    "jenkinsJob", "backend/job"
                 ))))
             .andExpect(status().isBadRequest());
     }
@@ -76,8 +88,7 @@ class PipelineControllerTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(mapper.writeValueAsString(Map.of(
                     "jenkinsJob", "backend/../../../etc/passwd",
-                    "paramType",  "BRANCH",
-                    "paramValue", "main"
+                    "gitBranch",  "origin/main"
                 ))))
             .andExpect(status().isBadRequest());
     }

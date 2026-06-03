@@ -3,6 +3,7 @@ package com.deploymate.service;
 import com.deploymate.config.AppProperties;
 import com.deploymate.model.DeployException;
 import com.deploymate.model.ErrorCode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import okhttp3.OkHttpClient;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -33,17 +34,20 @@ class JiraServiceTest {
             new AppProperties.Defaults("env/staging", "env-stag")
         );
 
-        service = new JiraService(props, new OkHttpClient.Builder()
-            .addInterceptor(chain -> {
-                var original = chain.request();
-                var newUrl   = original.url().newBuilder()
-                    .scheme("http")
-                    .host(server.getHostName())
-                    .port(server.getPort())
-                    .build();
-                return chain.proceed(original.newBuilder().url(newUrl).build());
-            })
-            .build());
+        service = new JiraService(
+            new OkHttpClient.Builder()
+                .addInterceptor(chain -> {
+                    var original = chain.request();
+                    var newUrl   = original.url().newBuilder()
+                        .scheme("http")
+                        .host(server.getHostName())
+                        .port(server.getPort())
+                        .build();
+                    return chain.proceed(original.newBuilder().url(newUrl).build());
+                })
+                .build(),
+            new ObjectMapper(),
+            props);
     }
 
     @AfterEach

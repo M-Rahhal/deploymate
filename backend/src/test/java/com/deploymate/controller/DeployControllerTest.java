@@ -2,6 +2,7 @@ package com.deploymate.controller;
 
 import com.deploymate.dto.ServiceRowDto;
 import com.deploymate.dto.ServiceRowDto.ServiceType;
+import com.deploymate.dto.ServiceRowDto.Steps;
 import com.deploymate.service.LogService;
 import com.deploymate.service.OrchestratorService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -32,7 +33,8 @@ class DeployControllerTest {
     private ServiceRowDto validRow() {
         return new ServiceRowDto(
             "row-1", "My SDK", "my-sdk", ServiceType.SDK, 1,
-            "PROJ-1", "env/staging", "backend/sdk-deploy", "", false, false
+            "PROJ-1", "env/staging", "backend/sdk-deploy", "",
+            new Steps(true, false, true, false)
         );
     }
 
@@ -63,7 +65,8 @@ class DeployControllerTest {
     void deployAll_returns400_whenRowRepoIsInvalid() throws Exception {
         var badRow = new ServiceRowDto(
             "r1", "name", "../../etc/passwd", ServiceType.SDK, 1,
-            "PROJ-1", "env/staging", "job", "", false, false
+            "PROJ-1", "env/staging", "job", "",
+            new Steps(true, false, true, false)
         );
 
         mvc.perform(post("/api/deploy/all")
@@ -83,6 +86,21 @@ class DeployControllerTest {
                     "ticket", "invalid-ticket-format",
                     "rows",   List.of(validRow())
                 ))))
+            .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    void deployAll_returns400_whenStepsIsNull() throws Exception {
+        var body = """
+            {"ticket":"PROJ-1","rows":[{
+              "id":"r1","name":"sdk","repo":"my-sdk","type":"SDK","stage":1,
+              "sourceBranch":"main","targetBranch":"env/staging","jenkinsJob":"job","tagName":"",
+              "steps":null
+            }]}
+            """;
+        mvc.perform(post("/api/deploy/all")
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(body))
             .andExpect(status().isBadRequest());
     }
 }

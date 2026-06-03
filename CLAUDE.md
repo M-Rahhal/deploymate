@@ -51,39 +51,37 @@ DeployMate is a **self-hosted, locally-run web application** that automates stag
 
 1. Opens `http://localhost:8080`
 2. Enters a Jira ticket number (e.g. `PROJ-123`) — this auto-fills the Default Source Branch
-3. Adds rows for every affected repository — display name, repo name, type (`SDK` or `SERVICE`), stage number (for SDKs)
-4. Configures per-row **source branch** (merge FROM) and **target branch** (merge INTO)
-5. Optionally toggles **Skip Merge** per row — skips merge+tag and fires pipeline immediately
-6. Optionally toggles **Update Jira** per row — posts structured ADF comments at every step
-7. Clicks **Deploy All** (or uses per-row step buttons for granular control)
+3. Adds rows for every affected repository — display name, repo name, type (`SDK` or `SERVICE`), **stage number**
+4. Configures per-row **source branch**, **target branch**, **Jenkins job**
+5. Configures which **Steps to execute** per row (all independently togglable):
+   - **Merge branch** — verify + merge source → target
+   - **Create tag** — fetch latest GitHub tag, compute next tag name, create GitHub pre-release
+   - **Trigger pipeline** — trigger Jenkins with `git_branch=<tagName>` (SERVICE — tag must be set) or `git_branch=origin/<targetBranch>` (SDK)
+   - **Post Jira comment** — post structured ADF comments at each step
+6. Clicks **Deploy All** (or uses per-row step buttons for granular control)
+7. Rows with the **same stage number** run **in parallel**; stages execute sequentially
 
-### What the tool does automatically (per row, in order)
+### What the tool does automatically (per row, using its steps config)
 
-**When Skip Merge is OFF (default):**
-1. Verifies the source branch exists on GitHub — stops immediately if not found
-2. Merges source branch → target branch via GitHub API
-3. Detects merge conflicts immediately and halts — does not proceed to next stage
-4. **Services only**: gets HEAD SHA of target branch, creates a git tag, creates a GitHub pre-release (marked `prerelease: true`)
-5. Triggers Jenkins pipeline:
-   - SDK: `BRANCH=<targetBranch>`
-   - Service: `TAG=<tagName>`
-6. Polls Jenkins every 5 seconds for build status
-7. Posts structured Jira ADF comments at each step (merge, tag, pipeline start, pipeline result)
-8. Writes all events to `logs/deploymate.log` (append-only)
+Each configured step runs in sequence per row:
 
-**When Skip Merge is ON:**
-1. Marks merge as `SKIPPED`
-2. Marks tag as `SKIPPED` (for Services)
-3. Triggers Jenkins pipeline immediately with `BRANCH=<targetBranch>` for both SDKs and Services
+1. **Merge branch** (if enabled): verifies source branch exists, merges source → target. Conflict halts that row.
+2. **Create tag** (if enabled): gets HEAD SHA of target branch, creates a git tag + GitHub pre-release (`prerelease: true`).
+3. **Trigger pipeline** (if enabled): fires Jenkins with parameter `git_branch`. Value is determined by **row type**:
+   - `SERVICE` → `git_branch=<tagName>` (pre-release tag; tagName must be set or the step fails)
+   - `SDK` → `git_branch=origin/<targetBranch>` (branch ref; no tag involved)
+4. Polls Jenkins every 5 seconds for build status
+5. **Post Jira comment** (if enabled): posts structured ADF comment at each step event
+6. Writes all events to `logs/deploymate.log` (append-only)
 
 ### Deploy All execution order
 
-- SDKs have a user-assigned **Stage number** (1-based)
-- SDKs within the same stage run **in parallel**
-- Stages execute **sequentially** — Stage 2 does not start until all Stage 1 SDKs are DONE
-- **Services** always run **last**, all in parallel, after every SDK stage completes
-- If a conflict or failure occurs in any stage, Deploy All **halts before the next stage starts**
+- All rows use **Stage number** (1-based) to control ordering
+- Rows with the **same stage number** run **in parallel**
+- Stages execute **sequentially** — Stage 2 does not start until all Stage 1 rows are DONE
+- If any row in a stage has a conflict or failure, Deploy All **halts before the next stage starts**
 - Already-DONE rows are **idempotent** — re-running skips DONE/SKIPPED steps
+- `type` (SDK / SERVICE) affects default step configuration and display only — not execution order
 
 ---
 
@@ -155,8 +153,10 @@ deploymate/                       ← git root
 ├── .env.example                  ← Template — copy to .env and fill in
 ├── .env                          ← Your credentials (GITIGNORED, NEVER COMMIT)
 ├── .gitignore
+├── .sdkmanrc                     ← Pins java=21.0.11-amzn for sdkman users
 ├── Dockerfile                    ← 3-stage: node:22-alpine → eclipse-temurin:21-jdk-alpine → 21-jre-alpine
-├── docker-compose.yml            ← Single container, named volume for logs
+├── docker-compose.yml            ← Single container, named volumes for logs + data
+├── postman_collection.json       ← Postman collection covering all 12 backend endpoints
 ├── README.md
 │
 ├── backend/                      ← Spring Boot 3.3.5, Java 21, Maven
@@ -172,10 +172,11 @@ deploymate/                       ← git root
 │       │   │   │   └── WebConfig.java              ← CORS for dev (:5173 → :8080)
 │       │   │   ├── controller/
 │       │   │   │   ├── MergeController.java        ← POST /api/merge
-│       │   │   │   ├── TagController.java          ← POST /api/tag
+│       │   │   │   ├── TagController.java          ← POST /api/tag, GET /api/tag/next
 │       │   │   │   ├── PipelineController.java     ← POST /api/pipeline/trigger, GET /api/pipeline/status
 │       │   │   │   ├── JiraController.java         ← POST /api/jira/comment
 │       │   │   │   ├── DeployController.java       ← POST /api/deploy/all
+│       │   │   │   ├── JenkinsConfigController.java ← GET/POST /api/jenkins/categories, /api/jenkins/service-names
 │       │   │   │   ├── LogController.java          ← GET /api/log
 │       │   │   │   └── SpaController.java          ← GET /** → forward:/index.html
 │       │   │   ├── dto/
@@ -183,24 +184,32 @@ deploymate/                       ← git root
 │       │   │   │   ├── MergeResponse.java
 │       │   │   │   ├── TagRequest.java
 │       │   │   │   ├── TagResponse.java
-│       │   │   │   ├── PipelineTriggerRequest.java (contains ParamType enum: BRANCH | TAG)
+│       │   │   │   ├── PipelineTriggerRequest.java (jenkinsJob + gitBranch — no ParamType enum)
 │       │   │   │   ├── PipelineTriggerResponse.java
 │       │   │   │   ├── PipelineStatusResponse.java (contains BuildState enum)
 │       │   │   │   ├── JiraCommentRequest.java
 │       │   │   │   ├── ServiceRowDto.java          (contains ServiceType enum: SDK | SERVICE)
 │       │   │   │   └── DeployAllRequest.java
+│       │   │   ├── entity/
+│       │   │   │   ├── JenkinsCategory.java        ← JPA entity: jenkins_categories table
+│       │   │   │   └── JenkinsServiceEntry.java    ← JPA entity: jenkins_service_entries (unique: category+name)
 │       │   │   ├── model/
 │       │   │   │   ├── DeployException.java        ← unchecked; carries ErrorCode + optional repo
 │       │   │   │   └── ErrorCode.java              ← CONFLICT, NOT_FOUND, AUTH_FAILED, NETWORK, INVALID_INPUT, RATE_LIMITED
+│       │   │   ├── repository/
+│       │   │   │   ├── JenkinsCategoryRepository.java
+│       │   │   │   └── JenkinsServiceEntryRepository.java
 │       │   │   └── service/
 │       │   │       ├── GitHubService.java          ← GitHub REST API via OkHttp
 │       │   │       ├── JenkinsService.java         ← Jenkins REST API via OkHttp
+│       │   │       ├── JenkinsConfigService.java   ← Idempotent save/list of Jenkins categories + service names (H2)
 │       │   │       ├── JiraService.java            ← Jira REST API v3 via OkHttp
 │       │   │       ├── OrchestratorService.java    ← Stage-aware Deploy All
 │       │   │       ├── LogService.java             ← SLF4J MDC wrapper
-│       │   │       └── TagGeneratorService.java    ← Generates env-stag-YYYYMMDD-repo-001
+│       │   │       └── TagGeneratorService.java    ← computeNextTag() — rc/staging/semver increment rules
 │       │   └── resources/
 │       │       ├── application.yml
+│       │       ├── application-test.yml            ← In-memory H2 for tests (ddl-auto: create-drop)
 │       │       └── static/                         ← Frontend build output (GITIGNORED)
 │       └── test/java/com/deploymate/
 │           ├── controller/
@@ -208,12 +217,14 @@ deploymate/                       ← git root
 │           │   ├── TagControllerTest.java
 │           │   ├── PipelineControllerTest.java
 │           │   ├── JiraControllerTest.java
+│           │   ├── JenkinsConfigControllerTest.java
 │           │   └── DeployControllerTest.java
 │           └── service/
 │               ├── GitHubServiceTest.java
 │               ├── JenkinsServiceTest.java
 │               ├── JiraServiceTest.java
-│               └── OrchestratorServiceTest.java
+│               ├── OrchestratorServiceTest.java
+│               └── TagGeneratorServiceTest.java
 │
 ├── frontend/                     ← React 19, Vite 6, TypeScript 5, Tailwind 3
 │   ├── package.json
@@ -277,9 +288,11 @@ deploymate/                       ← git root
 | Spring Boot | 3.3.5 | Framework |
 | spring-boot-starter-web | 3.3.5 | REST controllers, embedded Tomcat |
 | spring-boot-starter-validation | 3.3.5 | Bean Validation (`@Valid`, `@NotBlank`, etc.) |
+| spring-boot-starter-data-jpa | 3.3.5 | JPA/Hibernate for Jenkins config persistence |
 | spring-boot-starter-logging | 3.3.5 | SLF4J + Logback |
 | spring-boot-configuration-processor | 3.3.5 | `@ConfigurationProperties` annotation processing |
 | spring-boot-devtools | 3.3.5 | Hot reload in dev (runtime, optional) |
+| h2 | (runtime) | Embedded H2 database — file-based in prod, in-memory in tests |
 | okhttp3 | 4.12.0 | HTTP client for GitHub, Jenkins, Jira calls |
 | okhttp3-mockwebserver | 4.12.0 | Test dependency for service unit tests |
 | jackson-databind | (transitive) | JSON serialization/deserialization |
@@ -397,6 +410,18 @@ deploymate:
     target-branch: ${DEFAULT_TARGET_BRANCH:env/staging}
     tag-prefix: ${TAG_PREFIX:env-stag}
 
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/deploymate;AUTO_SERVER=TRUE
+    driver-class-name: org.h2.Driver
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    open-in-view: false
+
 logging:
   file:
     name: logs/deploymate.log       # Append-only; Spring Boot/Logback never truncates
@@ -472,6 +497,8 @@ public class WebConfig implements WebMvcConfigurer {
 `@RestControllerAdvice` that handles:
 - `DeployException` → maps `ErrorCode` to HTTP status (CONFLICT→409, NOT_FOUND→404, AUTH_FAILED→401, INVALID_INPUT→400, others→500)
 - `MethodArgumentNotValidException` → HTTP 400 with `{error: "INVALID_INPUT", details: [...field errors]}`
+- `ConstraintViolationException` → HTTP 400 (for `@Validated` `@RequestParam` violations)
+- `MissingServletRequestParameterException` → HTTP 400 with field name in message
 - `Exception` (catch-all) → HTTP 500 with generic message; stack traces **never** exposed to client
 
 Response body shape for errors:
@@ -487,9 +514,9 @@ Response body shape for errors:
 All request DTOs use Jakarta Bean Validation. All response DTOs are plain records.
 
 #### `dto/MergeRequest.java`
+`org` is **not** a field — the backend reads it from `AppProperties.github().org()`.
 ```java
 public record MergeRequest(
-    @NotBlank @Pattern(regexp = "^[a-zA-Z0-9_.-]{1,100}$")   String org,
     @NotBlank @Pattern(regexp = "^[a-zA-Z0-9_.-]{1,100}$")   String repo,
     @NotBlank @Pattern(regexp = "^[a-zA-Z0-9/_.-]{1,255}$")  String sourceBranch,
     @NotBlank @Pattern(regexp = "^[a-zA-Z0-9/_.-]{1,255}$")  String targetBranch,
@@ -503,9 +530,9 @@ public record MergeResponse(boolean success, boolean conflict, String sha, Strin
 ```
 
 #### `dto/TagRequest.java`
+`org` is **not** a field — the backend reads it from `AppProperties.github().org()`.
 ```java
 public record TagRequest(
-    @NotBlank @Pattern(regexp = "^[a-zA-Z0-9_.-]{1,100}$")   String org,
     @NotBlank @Pattern(regexp = "^[a-zA-Z0-9_.-]{1,100}$")   String repo,
     @NotBlank @Pattern(regexp = "^[a-zA-Z0-9._-]{1,128}$")   String tagName,
     @NotBlank @Pattern(regexp = "^[a-zA-Z0-9/_.-]{1,255}$")  String targetBranch,
@@ -522,11 +549,15 @@ public record TagResponse(boolean success, String tagName, String sha, String re
 ```java
 public record PipelineTriggerRequest(
     @NotBlank @Pattern(regexp = "^[a-zA-Z0-9/_-]{1,200}$") String jenkinsJob,
-    @NotNull                                                ParamType paramType,  // BRANCH | TAG
-    @NotBlank                                               String paramValue
-) {
-    public enum ParamType { BRANCH, TAG }
-}
+    @NotBlank                                               String gitBranch
+) {}
+```
+
+The Jenkins parameter key is always `git_branch`. No `ParamType` enum — the caller decides what value to pass:
+- SDK row: `gitBranch = "origin/" + targetBranch`
+- SERVICE row: `gitBranch = tagName` (if `tagName` is empty the step immediately fails with an error toast)
+
+```java
 ```
 
 #### `dto/PipelineTriggerResponse.java`
@@ -567,12 +598,23 @@ public record ServiceRowDto(
     @NotBlank @Pattern(regexp = "^[a-zA-Z0-9/_.-]{1,255}$")        String targetBranch,
     @NotBlank @Pattern(regexp = "^[a-zA-Z0-9/_-]{1,200}$")         String jenkinsJob,
     @Pattern(regexp = "^([a-zA-Z0-9._-]{1,128})?$")                String tagName,
-    boolean updateJira,
-    boolean skipMerge
+    @NotNull @Valid                                                  Steps steps
 ) {
     public enum ServiceType { SDK, SERVICE }
+
+    /** Per-service step configuration. All steps independently togglable. */
+    public record Steps(
+        boolean mergeBranch,     // verify + merge source → target
+        boolean createTag,       // create pre-release tag; also switches pipeline param to TAG
+        boolean triggerPipeline, // trigger Jenkins build
+        boolean updateJira       // post ADF comments to Jira
+    ) {}
 }
 ```
+
+**Pipeline param logic (determined by `type`, not by `steps.createTag`):**
+- `type=SERVICE` → `git_branch=<tagName>` (pre-release tag; tagName must be non-blank or pipeline step fails immediately)
+- `type=SDK` → `git_branch=origin/<targetBranch>` (branch ref; no tag involved)
 
 #### `dto/DeployAllRequest.java`
 ```java
@@ -623,7 +665,9 @@ All methods throw `DeployException` on error. The **constructor accepts an `OkHt
 | `verifyBranch` | `(String repo, String branch) → boolean` | `true` if 200, `false` if 404, throws on other errors | GET `/repos/{org}/{repo}/git/refs/heads/{branch}` |
 | `mergeBranch` | `(String repo, String src, String target, String ticket) → MergeResult` | `MergeResult(success, conflict, sha)` | POST `/repos/{org}/{repo}/merges` — 201→success with SHA, 204→already up-to-date, 409→conflict, other→throws |
 | `getBranchSha` | `(String repo, String branch) → String` | HEAD commit SHA | GET `/repos/{org}/{repo}/git/refs/heads/{branch}` → `.object.sha` |
-| `createTagAndPreRelease` | `(String repo, String tagName, String sha, String ticket) → TagResult` | `TagResult(releaseUrl)` | Two calls: POST `/git/refs` then POST `/releases` with `prerelease:true` |
+| `getLatestTag` | `(String repo) → Optional<String>` | Most recently created git tag name, or empty | GET `/repos/{org}/{repo}/tags?per_page=1` — uses the tags API (not releases) so tags without an associated GitHub release are included; GitHub returns tags sorted by commit date descending |
+| `tagExists` | `(String repo, String tagName) → boolean` | `true` if tag ref exists | GET `/repos/{org}/{repo}/git/refs/tags/{tagName}` — 200→true, 404→false |
+| `createTagAndPreRelease` | `(String repo, String tagName, String sha, String ticket) → TagResult` | `TagResult(releaseUrl)` | **First calls `tagExists()` — throws INVALID_INPUT if already exists.** Then POST `/git/refs` then POST `/releases` with `prerelease:true` |
 
 Inner records: `MergeResult(boolean success, boolean conflict, String sha)`, `TagResult(String releaseUrl)`
 
@@ -634,12 +678,13 @@ Uses `OkHttpClient` with HTTP Basic auth (`user:token` base64-encoded).
 
 | Method | Signature | Returns | Notes |
 |--------|-----------|---------|-------|
-| `triggerBuild` | `(String jobPath, String paramType, String paramValue) → String` | Queue item URL (from `Location` header) | POST `/job/{jobPath}/buildWithParameters?{paramType}={paramValue}` — expects 201 |
+| `triggerBuild` | `(String jobPath, String gitBranchValue) → String` | Queue item URL (from `Location` header) | POST `/job/{jobPath}/buildWithParameters?git_branch={urlEncoded}` — expects 201 |
 | `pollQueueItem` | `(String queueItemUrl) → String\|null` | Build URL or `null` if still queued | GET `{queueItemUrl}api/json` → `.executable.url` |
 | `pollBuildStatus` | `(String buildUrl) → BuildStatus` | `BuildStatus(result, number)` | GET `{buildUrl}api/json`; `result` is `null` while running |
 | `getBuildLog` | `(String buildUrl, int start) → LogFragment` | `LogFragment(text, nextStart, hasMore)` | GET `{buildUrl}logText/progressiveText?start={start}` |
+| `getLastDeployedBranch` | `(String jobPath) → Optional<String>` | `git_branch` value from last successful build, or empty | GET `{jobPath}/lastSuccessfulBuild/api/json?tree=actions[parameters[name,value]]` — parses `git_branch` param; returns `Optional.empty()` on 404 or missing param; never throws |
 
-Jenkins job path format: nested folders use `/` separator (e.g. `Team/Backend/deploy`). The `triggerBuild` method converts this with `.replace("/", "/job/")`.
+Jenkins job path format: nested folders use `/` separator (e.g. `Team/Backend/deploy`). The `triggerBuild` and `getLastDeployedBranch` methods both convert this with `.replace("/", "/job/")`.
 
 Inner records: `Crumb(String field, String value)`, `BuildStatus(String result, int number)`, `LogFragment(String text, int nextStart, boolean hasMore)`
 
@@ -657,11 +702,28 @@ Private `toAdf(String text)` method converts plain text to a minimal ADF documen
 
 #### `service/TagGeneratorService.java`
 
-Generates tag names in the format: `{tagPrefix}-{YYYYMMDD}-{repo}-{sequence:03d}`
+Computes the next tag name from the last GitHub tag for a repository.
 
-Example: `env-stag-20260601-payment-service-001`
+`computeNextTag(String lastTagName) → String` — rules:
+1. `lastTagName` is null/blank → `"v1.0.0rc1"`
+2. Ends with `rc<N>` (case-insensitive) → `<base>rc<N+1>` (e.g. `v1.0.0rc1` → `v1.0.0rc2`)
+3. Matches `<base>staging<N>` → `<base>staging<N+1>` (e.g. `v1.0.0-staging1` → `v1.0.0-staging2`)
+4. Contains `"staging"` (no trailing number) → `<lastTag>2`
+5. Matches semver `(v?)M.N.P` → `<v?>M.N.<P+1>rc1` (e.g. `v1.0.0` → `v1.0.1rc1`)
+6. Fallback → `<lastTag>rc1`
 
-`generate(String repo, int sequence)` — uses `LocalDate.now()` with `yyyyMMdd` format.
+Regex patterns: `RC_PATTERN = ^(.+?)rc(\d+)$`, `STAGING_NUM_PATTERN = ^(.+?staging)(\d+)$`, `SEMVER_PATTERN = ^(v?)(\d+)\.(\d+)\.(\d+)$`
+
+#### `service/JenkinsConfigService.java`
+
+`@Service @Transactional` — persists Jenkins categories and service names to H2.
+
+| Method | Description |
+|--------|-------------|
+| `getCategories() → List<String>` | All category names, sorted alphabetically |
+| `saveCategory(String name) → String` | Idempotent — trims, saves only if not already stored, returns trimmed name |
+| `getServiceNames(String categoryName) → List<String>` | All service names for a category, sorted alphabetically |
+| `saveServiceName(String categoryName, String serviceName)` | Idempotent — creates category if needed, saves entry only if not already stored |
 
 #### `service/LogService.java`
 
@@ -699,7 +761,7 @@ All controllers:
 
 #### `POST /api/pipeline/trigger`
 **`PipelineController`** — triggers a Jenkins build.
-1. Calls `jenkins.triggerBuild()` with `paramType` (BRANCH or TAG) and `paramValue`
+1. Calls `jenkins.triggerBuild(req.jenkinsJob(), req.gitBranch())` — always uses `git_branch` Jenkins parameter
 2. Returns 200 with `{success:true, queueItemUrl, message:"Build queued"}`
 
 #### `GET /api/pipeline/status?[queueItemUrl=...][&buildUrl=...]`
@@ -708,6 +770,29 @@ All controllers:
 - If `buildUrl` is given (or resolved): calls `pollBuildStatus()` and `getBuildLog()`
 - Returns last 4000 chars of log in `logFragment`
 - `state` mapped from Jenkins result string: SUCCESS→SUCCESS, FAILURE→FAILURE, ABORTED→ABORTED, null→RUNNING
+
+#### `GET /api/tag/next?repo=<name>[&jenkinsJob=<path>]`
+**`TagController`** — suggests the next tag name and optionally returns the last deployed tag from Jenkins.
+1. Calls `github.getLatestTag(repo)` to get the most recent GitHub release tag
+2. Calls `tagGen.computeNextTag(latestTag)` to compute the next value
+3. If `jenkinsJob` is provided, calls `jenkins.getLastDeployedBranch(jenkinsJob)` to get the `git_branch` value from the last successful build
+4. Returns 200 with `{tagName: "v1.0.1rc1", previousTag: "v1.0.0", lastDeployedTag: "v1.0.0rc1"}` (`lastDeployedTag` is `null` if no `jenkinsJob` was given or no successful build exists)
+
+#### `GET /api/jenkins/categories`
+**`JenkinsConfigController`** — lists all saved Jenkins category names.
+Returns `{categories: [...]}`.
+
+#### `POST /api/jenkins/categories`
+**`JenkinsConfigController`** — saves a new category.
+Body: `{name: "my-category"}`. Idempotent — no error if already exists.
+
+#### `GET /api/jenkins/service-names?category=<name>`
+**`JenkinsConfigController`** — lists all service names for a category.
+`@Validated` class + `@NotBlank` param — returns 400 if `category` is missing/blank.
+
+#### `POST /api/jenkins/service-names`
+**`JenkinsConfigController`** — saves a service name under a category.
+Body: `{category: "team", name: "my-service"}`. Idempotent.
 
 #### `POST /api/jira/comment`
 **`JiraController`** — posts a comment to Jira.
@@ -771,23 +856,24 @@ public interface StepCallback {
 Currently wired to `NoOpCallback` in `DeployController`. Future: SSE.
 
 #### `mergeOnly(row, ticket, stageLabel, cb) → boolean`
-1. If `skipMerge=true` → `onMergeState(SKIPPED)` → return `true`
+1. If `!steps.mergeBranch` → `onMergeState(SKIPPED)` → return `true`
 2. `verifyBranch()` → if not found: `onMergeState(FAILED)` → return `false`
 3. `onMergeState(RUNNING)` → call `mergeBranch()`
 4. If conflict: `onMergeState(CONFLICT)` + Jira comment → return `false`
 5. Success: `onMergeState(DONE)` + Jira comment → return `true`
 
 #### `tagOnly(row, ticket, stageLabel, cb) → boolean`
-1. If `type != SERVICE` OR `skipMerge=true` → `onTagState(SKIPPED)` → return `true`
+1. If `!steps.createTag` → `onTagState(SKIPPED)` → return `true`
 2. `onTagState(RUNNING)` → `getBranchSha()` → `createTagAndPreRelease()`
 3. Success: `onTagState(DONE)` + Jira comment → return `true`
 4. Exception: `onTagState(FAILED)` → return `false`
 
 #### `pipelineOnly(row, ticket, stageLabel, cb) → boolean`
-- `useTag = type == SERVICE && !skipMerge`
-- `paramType = useTag ? "TAG" : "BRANCH"`
-- `paramValue = useTag ? tagName : targetBranch`
-1. `onPipelineState(RUNNING)` → `triggerBuild()` → get `queueItemUrl`
+- If `!steps.triggerPipeline` → `onPipelineState(SKIPPED)` → return `true`
+- `gitBranch` is determined by **`row.type()`** (not `steps.createTag`):
+  - `SERVICE` → `gitBranch = row.tagName()` (if blank → `onPipelineState(FAILED)` + return `false`)
+  - `SDK` → `gitBranch = "origin/" + row.targetBranch()`
+1. `onPipelineState(RUNNING)` → `triggerBuild(jenkinsJob, gitBranch)` → get `queueItemUrl`
 2. Poll `pollQueueItem()` every 3s until build URL is assigned
 3. `onPipelineState(RUNNING, buildUrl, buildNumber)` + Jira comment
 4. Poll `pollBuildStatus()` every 5s until result is non-null
@@ -798,13 +884,12 @@ Currently wired to `NoOpCallback` in `DeployController`. Future: SSE.
 Idempotent: skips steps already in `DONE` or `SKIPPED` state.
 
 #### `deployAll(rows, ticket, cb)`
-Full stage-ordered deployment:
+Unified stage-ordered deployment (all row types use stage number):
 1. Writes session separator to log
-2. Groups SDKs by stage number, sorts by stage
+2. Groups **all rows** by stage number, sorts by stage — `type` (SDK/SERVICE) does not affect order
 3. For each stage: creates `FixedThreadPool(stageRows.size())`, runs `deployAllSteps` via `CompletableFuture.supplyAsync`, awaits all futures
 4. If any stage has failures → logs error → **returns early** (halts)
-5. After all SDK stages: runs all Services in parallel
-6. Uses `CompletableFuture.join()` to wait for all
+5. Uses `CompletableFuture.join()` to wait for all
 
 ---
 
@@ -840,18 +925,25 @@ type OverallState =
   | 'PIPELINE_QUEUED' | 'PIPELINE_RUNNING'
   | 'DONE' | 'FAILED';
 
+type JenkinsEnvMode = 'type' | 'env';
+// 'type' = SDK→dev, SERVICE→staging (auto); 'env' = explicit env field
+
 interface ServiceRow {
   id: string;              // UUID (client-generated)
   name: string;            // Human-readable display name
   repo: string;            // GitHub repo name (exact)
-  type: ServiceType;
-  stage: number;           // 1-based; ignored for SERVICE type
+  type: ServiceType;       // affects default steps and display only
+  stage: number;           // 1-based; controls execution order for all row types
   sourceBranch: string;    // Merge FROM
   targetBranch: string;    // Merge INTO
-  jenkinsJob: string;      // e.g. "team/my-sdk-deploy"
-  tagName: string;         // Auto-generated from repo, editable; SERVICE only
-  updateJira: boolean;
-  skipMerge: boolean;      // When true: skip merge+tag, use BRANCH param
+  // Jenkins URL builder fields (compute jenkinsJob = category/env/serviceName)
+  jenkinsJob: string;      // computed: e.g. "team/staging/my-service"
+  jenkinsCategory: string;     // e.g. "team"
+  jenkinsEnvMode: JenkinsEnvMode;
+  jenkinsEnv: string;          // explicit env when mode='env'
+  jenkinsServiceName: string;  // e.g. "my-service"
+  tagName: string;         // Fetched from GitHub (computeNextTag) or manually entered; used when steps.createTag=true
+  steps: ServiceRowSteps;  // per-step toggles (replaces skipMerge + updateJira)
 
   // Per-step states
   mergeState:    StepState;
@@ -884,7 +976,8 @@ interface ActivityLogEntry {
 
 // API shapes (must match backend DTOs exactly):
 // MergeRequest, MergeResponse, TagRequest, TagResponse
-// PipelineTriggerRequest, PipelineTriggerResponse
+// PipelineTriggerRequest: {jenkinsJob, gitBranch}
+// PipelineTriggerResponse
 // PipelineStatusResponse (BuildState: 'QUEUED'|'RUNNING'|'SUCCESS'|'FAILURE'|'ABORTED'|'UNKNOWN')
 // ServiceRowDto, ApiError
 ```
@@ -924,7 +1017,14 @@ interface DeployStore {
 }
 ```
 
-`blankRow(globalConfig)` defaults: `type:'SDK'`, `stage:1`, `sourceBranch: defaultSourceBranch || ticket`, `targetBranch: defaultTargetBranch || 'env/staging'`, `updateJira:true`, `skipMerge:false`, all states `IDLE`, all outputs `null`.
+`blankRow(globalConfig)` defaults: `type:'SDK'`, `stage:1`, `sourceBranch: defaultSourceBranch || ticket`, `targetBranch: defaultTargetBranch || 'env/staging'`, `jenkinsCategory:''`, `jenkinsEnvMode:'type'`, `jenkinsEnv:'dev'`, `jenkinsServiceName:''`, all states `IDLE`, all outputs `null`.
+
+`buildJenkinsJob(category, env, serviceName)` helper returns `"${category}/${env}/${serviceName}"` — `JenkinsService.triggerBuild` converts this to `/job/a/job/b/job/c` internally.
+
+Side effects in `updateRow`:
+- `repo` changes on a SERVICE row with `createTag=true` → calls `apiGetNextTag(repo)` asynchronously, then calls `updateRow(id, {tagName})` with the result (Immer draft is sealed before the promise resolves, so the async set is done outside the draft)
+- `type` changes to SERVICE + repo set → triggers same async tag fetch
+- `jenkinsCategory/jenkinsEnvMode/jenkinsEnv/jenkinsServiceName` changes → recomputes `jenkinsJob`
 
 ### 7.4 API Layer
 
@@ -938,6 +1038,11 @@ interface DeployStore {
 | `apiPipelineStatus` | GET | `/pipeline/status?[queueItemUrl][&buildUrl]` | — | `PipelineStatusResponse` |
 | `apiJiraComment` | POST | `/jira/comment` | `{issueKey, text}` | void |
 | `apiDeployAll` | POST | `/deploy/all` | `{ticket, rows}` | void |
+| `apiGetNextTag` | GET | `/tag/next?repo=...&jenkinsJob=...` | — | `{tagName, previousTag, lastDeployedTag}` (`jenkinsJob` optional; `lastDeployedTag` is `null` when omitted or no successful build) |
+| `apiGetCategories` | GET | `/jenkins/categories` | — | `{categories: string[]}` |
+| `apiSaveCategory` | POST | `/jenkins/categories` | `{name}` | void |
+| `apiGetServiceNames` | GET | `/jenkins/service-names?category=...` | — | `{names: string[]}` |
+| `apiSaveServiceName` | POST | `/jenkins/service-names` | `{category, name}` | void |
 | `apiGetLog` | GET | `/log?lines=200` | — | `string[]` |
 
 **Special case:** `apiBranchMerge` does NOT use the generic `post()` helper because HTTP 409 (conflict) is a **valid business response** that must not throw — it reads the body and returns it as `MergeResponse`.
@@ -948,33 +1053,34 @@ interface DeployStore {
 
 All hooks follow the same contract: `{ run: () => void, running: boolean }`.
 
-**`useMergeAction(row, org)`**
+**`useMergeAction(row)`** — `org` removed; backend reads org from AppProperties
 1. Sets `mergeState = RUNNING`, appends log
-2. Calls `apiBranchMerge()`
+2. Calls `apiBranchMerge()` (no `org` field in payload)
 3. On conflict: `mergeState = CONFLICT`, toast.warning
 4. On success: `mergeState = DONE`, stores `mergeCommitSha`, toast.success
 5. On error: `mergeState = FAILED`, toast.error
 
-**`useTagAction(row, org)`**
+**`useTagAction(row)`** — `org` removed; backend reads org from AppProperties
 1. Sets `tagState = RUNNING`, appends log
-2. Calls `apiCreateTag()`
+2. Calls `apiCreateTag()` (no `org` field in payload)
 3. On success: `tagState = DONE`, stores `tagReleaseUrl`, toast.success
 4. On error: `tagState = FAILED`, toast.error
 
 **`usePipelineAction(row)`**
-- Determines `paramType`/`paramValue` from row type + skipMerge
-- `useTag = type === 'SERVICE' && !skipMerge` → TAG param; otherwise BRANCH param
+- Computes `gitBranch` by **`row.type`**:
+  - `SERVICE` → `gitBranch = row.tagName`; if empty, immediately sets `pipelineState = FAILED` with a toast error (no API call made)
+  - `SDK` → `gitBranch = "origin/" + row.targetBranch`
 1. Sets `pipelineState = RUNNING`, appends log
-2. Calls `apiTriggerPipeline()`
+2. Calls `apiTriggerPipeline({ jenkinsJob, gitBranch })`
 3. Polls `apiPipelineStatus()` every **5000ms** until state is not QUEUED/RUNNING
 4. When `buildUrl` first appears: stores it + `buildNumber`, appends log
 5. `SUCCESS` → `pipelineState = DONE`, stores `buildLog`, toast.success
 6. Other → `pipelineState = FAILED`, toast.error
 
-**`useAllStepsAction(row, org)`**
+**`useAllStepsAction(row)`** — `org` parameter removed
 Composes the three above hooks. Runs steps in sequence, checking fresh store state between each:
-1. Skip merge if `skipMerge=true` OR `mergeState === 'DONE'`
-2. Skip tag if `type !== 'SERVICE'` OR `skipMerge=true` OR `tagState === 'DONE'`
+1. Skip merge if `steps.mergeBranch=false` OR `mergeState === 'DONE'`
+2. Skip tag if `steps.createTag=false` OR `tagState === 'DONE'`; if tag fails, returns early (pipeline does not run)
 3. Skip pipeline if `pipelineState === 'DONE'`
 4. Reads **fresh** row state from `useDeployStore.getState()` after each step to check if it succeeded
 
@@ -1009,7 +1115,7 @@ Renders `<AnimatePresence>` around a list of `<ServiceRow>` components. Shows `<
 #### `ServiceRow.tsx`
 Full expandable card per service row. Key features:
 - Header: index pill + Name input + Repo input + type badge + `<StatusBadge>` + expand/collapse chevron + delete button
-- Expanded body (grid layout): Type select, Stage input (SDK only), Source Branch, Target Branch, Jenkins Job, Tag Name (SERVICE + !skipMerge), Skip Merge switch, Update Jira switch
+- Expanded body (grid layout): Type select, Stage input, Source Branch, Target Branch, **Jenkins URL Builder** (category combobox + env mode toggle + service name combobox → computes `jenkinsJob`), Tag Name field with refresh button (SERVICE + createTag), step toggles (Merge/Tag/Pipeline/Jira switches)
 - Step badges row: `<StepBadge step="Merge" ...>`, `<StepBadge step="Tag" ...>` (SERVICE only), `<StepBadge step="Pipeline" ...>`, `<BuildLogButton>`
 - Action buttons (conditional):
   - `[Merge]` — hidden if `skipMerge=true` OR `mergeState === 'DONE'`
@@ -1017,7 +1123,7 @@ Full expandable card per service row. Key features:
   - `[Pipeline]` — shown when `pipelineState !== 'DONE'`
   - `[Run all]` — shown when row is not `overall === 'DONE'`
 - Conflict panel shown when `mergeState === 'CONFLICT'`
-- `ORG` is read from `window.__ORG__` (future: move to store/config)
+- `ORG` is read from `window.__ORG__` (future: move to Zustand `globalConfig`)
 - framer-motion: row enters with `opacity:0, y:-8` → `opacity:1, y:0`
 
 #### `StatusBadge.tsx`
@@ -1117,49 +1223,77 @@ All tool responses pass through `sanitize()` before being returned to Claude:
 - Redacts Bearer tokens
 - Redacts URL passwords
 
-### 6 MCP Tools
+### Rate Limiting (updated)
 
-#### `deploy_sdk`
-Merge + trigger Jenkins for an SDK. Uses `BRANCH` param.
-```
-args: name, repo, sourceBranch, targetBranch (default: "env/staging"),
-      jenkinsJob, ticket (optional), skipMerge (default: false), updateJira (default: false)
-```
-Steps: (1) POST `/api/merge` if !skipMerge, check conflict, (2) POST `/api/pipeline/trigger` with BRANCH=targetBranch.
+- `get_pipeline_status`, `get_log`: 30/min
+- `add_jira_comment`: 20/min
+- `deploy_all`: 5/min
+- all others: 10/min
 
-#### `deploy_service`
-Merge + tag + trigger Jenkins for a service. Uses `TAG` param (or `BRANCH` if skipMerge).
-```
-args: name, repo, sourceBranch, targetBranch, jenkinsJob, tagName,
-      ticket (optional), skipMerge (default: false), updateJira (default: false)
-```
-Steps: (1) POST `/api/merge`, (2) POST `/api/tag`, (3) POST `/api/pipeline/trigger`.
+### 9 MCP Tools
 
-#### `deploy_all`
-Submit a full batch to the backend orchestrator.
-```
-args: ticket (optional), rows: Array<{id, name, repo, type, stage, sourceBranch, targetBranch, jenkinsJob, tagName, updateJira, skipMerge}>
-```
-Returns immediately with accepted message. Orchestrator runs asynchronously.
+#### Atomic tools (one backend endpoint each)
 
-#### `get_pipeline_status`
-Poll Jenkins build status.
+**`merge_branch`** — verify branch + merge source → target. Calls `POST /api/merge`.
+```
+args: repo, sourceBranch, targetBranch (default: "env/staging"), ticket (optional)
+note: org is NOT sent — backend reads it from AppProperties
+```
+
+**`create_tag`** — create a GitHub pre-release tag. Calls `POST /api/tag`.
+```
+args: repo, tagName, targetBranch (default: "env/staging"), ticket (optional)
+note: org is NOT sent — backend reads it from AppProperties
+```
+
+**`trigger_pipeline`** — fire a Jenkins build. Calls `POST /api/pipeline/trigger`.
+```
+args: jenkinsJob, gitBranch (the exact value for the git_branch Jenkins parameter)
+note: caller must pass the correct value:
+  SERVICE → gitBranch = tagName (pre-release tag)
+  SDK     → gitBranch = "origin/<targetBranch>"
+```
+
+**`get_next_tag`** — suggest next tag + optionally query last Jenkins deploy. Calls `GET /api/tag/next`.
+```
+args: repo, jenkinsJob (optional — when provided, also returns lastDeployedTag from Jenkins)
+returns: {tagName, previousTag, lastDeployedTag}
+  tagName         — suggested next tag (computed from latest GitHub release)
+  previousTag     — most recent GitHub release tag
+  lastDeployedTag — git_branch value from last successful Jenkins build (null if no jenkinsJob or no build)
+```
+
+**`get_jenkins_categories`** — list saved Jenkins categories. Calls `GET /api/jenkins/categories`.
+```
+args: none
+```
+
+**`get_pipeline_status`** — poll a build. Calls `GET /api/pipeline/status`.
 ```
 args: queueItemUrl (optional URL), buildUrl (optional URL)
 ```
-Returns state, buildNumber, buildUrl.
 
-#### `add_jira_comment`
-Post a comment to a Jira issue.
+**`add_jira_comment`** — post a comment. Calls `POST /api/jira/comment`.
 ```
-args: issueKey (regex ^[A-Z]{1,20}-[0-9]{1,10}$), text (max 5000 chars)
+args: issueKey (^[A-Z]{1,20}-[0-9]{1,10}$), text (max 5000 chars)
 ```
 
-#### `get_log`
-Fetch recent deployment log lines.
+**`get_log`** — tail the log file. Calls `GET /api/log`.
 ```
-args: lines (1-500, default 50), filter (optional substring for service name)
+args: lines (1–500, default 50), filter (optional substring)
 ```
+
+#### Batch tool
+
+**`deploy_all`** — submit a full batch to the backend orchestrator.
+```
+args: ticket (optional),
+      rows: Array<{id, name, repo, type, stage, sourceBranch, targetBranch, jenkinsJob, tagName,
+                   steps: {mergeBranch, createTag, triggerPipeline, updateJira}}>
+note: type determines git_branch strategy — SERVICE uses tagName, SDK uses origin/targetBranch
+      tagName is required (non-blank) for SERVICE rows; pipeline step fails immediately if missing
+```
+Returns immediately with accepted message. Orchestrator handles stage ordering and parallel execution.
 
 ### Register with Claude Code
 
@@ -1192,20 +1326,24 @@ Or for development (no build step):
 
 ### Parameter Logic
 
-| Service Type | Skip Merge | Pipeline Parameter |
-|---|---|---|
-| SDK | false | `BRANCH=<targetBranch>` |
-| SDK | true | `BRANCH=<targetBranch>` |
-| SERVICE | false | `TAG=<tagName>` |
-| SERVICE | true | `BRANCH=<targetBranch>` |
+The Jenkins parameter key is **always** `git_branch`. The value is determined by **`row.type`**, not by `steps.createTag`:
+
+| Row Type | `git_branch` value |
+|---|---|
+| `SDK` | `origin/<targetBranch>` (always — no tag is ever used for SDK) |
+| `SERVICE` | `<tagName>` (the pre-release tag — **must be non-blank**; pipeline step fails immediately if empty) |
+
+`steps.createTag` controls whether the tag *creation step runs* as part of the deployment — it does not affect what value Jenkins receives. A SERVICE row with `createTag=false` must still have a `tagName` set manually before the pipeline step.
 
 ### Tag Auto-generation
 
-When a SERVICE row's `repo` field changes in the UI, `tagName` is auto-generated using `generateTagName(repo)`:
-```
-env-stag-{YYYYMMDD}-{repo}-001
-```
-The tag name is editable — the auto-value is just a default. Tag name is disabled when `skipMerge=true`.
+When a SERVICE row's `repo` field changes in the UI, the store calls `apiGetNextTag(repo)` and sets `tagName` from the result. When the user clicks **Fetch Info**, `apiGetNextTag(repo, jenkinsJob)` is called — passing `jenkinsJob` fetches both the latest GitHub tag and the `git_branch` value from the last successful Jenkins build, displayed as two separate lines below the tag input. The tag name is editable. `TagGeneratorService.computeNextTag(lastTag)` rules:
+- `v1.0.0rc1` → `v1.0.0rc2` (increment rc)
+- `v1.0.0-staging1` → `v1.0.0-staging2` (increment staging number)
+- `v1.0.0` → `v1.0.1rc1` (semver patch bump + rc1)
+- No previous tag → `v1.0.0rc1`
+
+Before creating, `GitHubService.createTagAndPreRelease` calls `tagExists()` and throws `INVALID_INPUT` if the tag already exists.
 
 ### Complete Step Flow Diagram
 
@@ -1352,25 +1490,29 @@ Jira comment content by step:
 
 ## 11. Testing
 
-### Backend Tests — 73 tests (all passing)
+### Backend Tests — 109 tests (all passing)
 
-**Run:** `cd backend && ./mvnw test`
+**Run:** `JAVA_HOME=~/.sdkman/candidates/java/21.0.11-amzn ./mvnw test`
+
+> **Java version note:** The project requires Java 21. If your shell default is different, set `JAVA_HOME` to the 21 JDK. A `.sdkmanrc` file is included — run `sdk env` in the repo root to auto-switch.
 
 #### Service Unit Tests (MockWebServer)
 
 Tests use `OkHttpClient` with a URL-rewriting interceptor to redirect real API hostnames to `MockWebServer`'s localhost URL.
 
-**`GitHubServiceTest`** (13 tests):
+**`GitHubServiceTest`** (16 tests):
 - `verifyBranch`: 200→true, 404→false, 500→throws NETWORK
 - `mergeBranch`: 201→success+sha, 204→success (already up-to-date), 409→conflict, 500→throws, ticket in commit message
 - `getBranchSha`: 200→sha, 404→throws NOT_FOUND
-- `createTagAndPreRelease`: 201+201→url, 422→throws; verifies 2 requests made, ref body contains `refs/tags/`, release body contains `prerelease`
+- `getLatestTag`: 200 with release→tagName, empty body→empty
+- `tagExists`: 200→true, 404→false
+- `createTagAndPreRelease`: first enqueues 404 (tagExists=false), then 201+201→url; if tagExists=200→throws INVALID_INPUT; verifies 3 requests total
 
-**`JenkinsServiceTest`** (tests): crumb fetch, trigger build (Location header), pollQueueItem, pollBuildStatus, getBuildLog
+**`JenkinsServiceTest`** (15 tests): crumb fetch, trigger build with `git_branch` parameter (Location header), pollQueueItem, pollBuildStatus, getBuildLog; `getLastDeployedBranch` — returns tag when param present, empty on 404, empty when git_branch param absent
 
 **`JiraServiceTest`** (tests): addComment success, addComment failure→throws NETWORK
 
-**`OrchestratorServiceTest`** (tests): mergeOnly skip, mergeOnly conflict halts, deployAll stage ordering
+**`OrchestratorServiceTest`** (19 tests): mergeOnly skip, mergeOnly conflict halts, deployAll stage ordering; pipelineOnly — SERVICE uses tagName regardless of createTag flag, SERVICE with empty tagName returns false, SDK uses `origin/branch`
 
 #### Controller Integration Tests (MockMvc + @WebMvcTest)
 
@@ -1383,18 +1525,22 @@ Tests use `OkHttpClient` with a URL-rewriting interceptor to redirect real API h
 - 400 when body is missing
 - 400 when ticket format is invalid
 
-**`TagControllerTest`** (tests): 200 success, 404 when branch not found, 400 validation
+**`TagControllerTest`** (8 tests): 200 success, 400 validation; `GET /api/tag/next` — 200 with computed tag + null lastDeployedTag when no jenkinsJob, 200 with lastDeployedTag when jenkinsJob provided, null lastDeployedTag when job has no successful build, 400 missing repo
 
-**`PipelineControllerTest`** (tests): trigger 200, status QUEUED/RUNNING/SUCCESS/FAILURE, 400 no params
+**`PipelineControllerTest`** (10 tests): trigger 200 with `gitBranch`, status QUEUED/RUNNING/SUCCESS/FAILURE, 400 no params
 
-**`JiraControllerTest`** (tests): 200 comment posted, 400 invalid issueKey
+**`JiraControllerTest`** (4 tests): 200 comment posted, 400 invalid issueKey
 
-**`DeployControllerTest`** (tests): 202 accepted, 400 empty rows
+**`JenkinsConfigControllerTest`** (7 tests): get categories, save category, get service-names, save service-name, 400 missing category param
+
+**`TagGeneratorServiceTest`** (13 parameterized tests): all rc/staging/semver/fallback rules, edge cases (rc9→rc10, no digits, missing prefix)
+
+**`DeployControllerTest`** (5 tests): 202 accepted, 400 empty rows
 
 ### Frontend Type Check
 
 ```bash
-cd frontend && npx tsc --noEmit --project tsconfig.app.json
+cd frontend && npm run typecheck
 # Expected: no output, exit code 0
 ```
 
@@ -1453,7 +1599,9 @@ services:
     image: deploymate:latest
     ports: ["8080:8080"]
     env_file: [.env]
-    volumes: [deploymate_logs:/app/logs]
+    volumes:
+      - deploymate_logs:/app/logs
+      - deploymate_data:/app/data
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:8080/ | grep -q 'DeployMate\\|html'"]
       interval: 30s, timeout: 10s, retries: 3, start_period: 45s
@@ -1465,6 +1613,8 @@ services:
 
 volumes:
   deploymate_logs:
+    driver: local
+  deploymate_data:
     driver: local
 ```
 
@@ -1520,8 +1670,9 @@ export JIRA_EMAIL=user@acme.com
 export JIRA_TOKEN=token
 # Or: export $(cat ../.env | xargs)
 
-./mvnw spring-boot:run
+JAVA_HOME=~/.sdkman/candidates/java/21.0.11-amzn ./mvnw spring-boot:run
 # → Spring Boot on :8080
+# Or: run `sdk env` first (reads .sdkmanrc) then ./mvnw spring-boot:run
 ```
 
 ### Terminal 2 — Frontend
@@ -1568,7 +1719,7 @@ npm run typecheck  # tsc --noEmit
 #### Backend (`backend/`)
 ```bash
 ./mvnw spring-boot:run   # Start with hot reload
-./mvnw test              # Run all 73 tests
+./mvnw test              # Run all 109 tests (requires Java 21 — set JAVA_HOME)
 ./mvnw package           # Build fat jar (runs tests)
 ./mvnw package -DskipTests  # Build fat jar (skip tests)
 ```
@@ -1648,14 +1799,23 @@ Every controller uses `@Valid` on `@RequestBody`. Regex enforcement:
 | P13 | MCP server — mcp/server.ts with all 6 tools | ✅ Done | d09dacd |
 | P14 | Dockerfile + docker-compose | ✅ Done | d09dacd |
 | P15 | End-to-end smoke test — scripts/smoke-test.sh (18 checks) | ✅ Done | d09dacd |
+| P16 | Per-service step config (steps: {mergeBranch, createTag, triggerPipeline, updateJira}) | ✅ Done | — |
+| P16 | Unified stage-based orchestration (type no longer controls order) | ✅ Done | — |
+| P16 | MCP 9 tools: merge_branch, create_tag, trigger_pipeline, get_next_tag, get_jenkins_categories | ✅ Done | — |
+| P17 | Jenkins URL builder — H2 DB, category/service comboboxes, env mode toggle | ✅ Done | — |
+| P17 | git_branch Jenkins parameter (replaces BRANCH/TAG enum) | ✅ Done | — |
+| P17 | Tag generation from GitHub latest tag (rc/staging/semver rules) | ✅ Done | — |
+| P17 | GET /api/tag/next endpoint + frontend auto-fetch + refresh button | ✅ Done | — |
+| P17 | JenkinsConfigController + JenkinsConfigService + H2 JPA entities | ✅ Done | — |
+| P17 | Postman collection (postman_collection.json) — all 12 endpoints | ✅ Done | — |
+| P17 | 103 backend tests passing | ✅ Done | — |
 
-**All 15 parts complete. Project is fully implemented.**
+**All parts complete. Project is fully implemented.**
 
 ### Future / Not Yet Built
 - SSE (Server-Sent Events) for real-time state updates from `OrchestratorService` to frontend — currently uses `NoOpCallback`. When added: replace `NoOpCallback` in `DeployController` and add an SSE endpoint.
-- `SpaController` currently has a `NoOpCallback` inner class defined at file level (outside `DeployController`) — this is a known oddity that works but could be moved to its own file.
 - `ORG` in `ServiceRow.tsx` reads from `window.__ORG__` — should be moved to Zustand `globalConfig` as a configurable field in `GlobalConfig.tsx`.
-- `usePipelineStatus.ts` and `useActivityLog.ts` mentioned in spec but not created as separate files — their functionality is baked into `useDeployActions.ts` and `ActivityLog.tsx` directly.
+- Smoke test script (`scripts/smoke-test.sh`) should be updated to test the new `steps` JSON shape and `gitBranch` in deploy/all and pipeline/trigger requests.
 
 ---
 

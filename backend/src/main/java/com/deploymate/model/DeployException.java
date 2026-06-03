@@ -1,9 +1,12 @@
 package com.deploymate.model;
 
+import lombok.Getter;
+
+@Getter
 public class DeployException extends RuntimeException {
 
     private final ErrorCode code;
-    private final String repo;
+    private final String    repo;
 
     public DeployException(String message, ErrorCode code) {
         this(message, code, null);
@@ -14,7 +17,4 @@ public class DeployException extends RuntimeException {
         this.code = code;
         this.repo = repo;
     }
-
-    public ErrorCode getCode() { return code; }
-    public String    getRepo() { return repo; }
 }

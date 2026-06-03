@@ -13,6 +13,9 @@ mcp/dist/
 logs/
 *.log
 
+# H2 database files
+data/
+
 # IDE
 .idea/
 *.iml

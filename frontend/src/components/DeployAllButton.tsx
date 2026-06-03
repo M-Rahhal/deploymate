@@ -18,8 +18,7 @@ function toDto(row: ServiceRow): ServiceRowDto {
     targetBranch: row.targetBranch,
     jenkinsJob:   row.jenkinsJob,
     tagName:      row.tagName,
-    updateJira:   row.updateJira,
-    skipMerge:    row.skipMerge,
+    steps:        row.steps,
   };
 }
 

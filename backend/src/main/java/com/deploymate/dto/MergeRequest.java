@@ -5,10 +5,6 @@ import jakarta.validation.constraints.Pattern;
 
 public record MergeRequest(
     @NotBlank
-    @Pattern(regexp = "^[a-zA-Z0-9_.-]{1,100}$", message = "org name contains invalid characters")
-    String org,
-
-    @NotBlank
     @Pattern(regexp = "^[a-zA-Z0-9_.-]{1,100}$", message = "repo name contains invalid characters")
     String repo,
 

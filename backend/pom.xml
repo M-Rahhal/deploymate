@@ -56,6 +56,26 @@
       <optional>true</optional>
     </dependency>
 
+    <!-- JPA for Jenkins config persistence -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-data-jpa</artifactId>
+    </dependency>
+
+    <!-- PostgreSQL driver (production database) -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <scope>runtime</scope>
+    </dependency>
+
+    <!-- H2 in-memory database (test scope only — keeps tests fast and self-contained) -->
+    <dependency>
+      <groupId>com.h2database</groupId>
+      <artifactId>h2</artifactId>
+      <scope>test</scope>
+    </dependency>
+
     <!-- OkHttp for external API calls -->
     <dependency>
       <groupId>com.squareup.okhttp3</groupId>

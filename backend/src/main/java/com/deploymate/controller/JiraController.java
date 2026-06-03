@@ -4,6 +4,7 @@ import com.deploymate.dto.JiraCommentRequest;
 import com.deploymate.service.JiraService;
 import com.deploymate.service.LogService;
 import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -11,15 +12,11 @@ import java.util.Map;
 
 @RestController
 @RequestMapping("/api/jira")
+@RequiredArgsConstructor
 public class JiraController {
 
     private final JiraService jira;
     private final LogService  logSvc;
-
-    public JiraController(JiraService jira, LogService logSvc) {
-        this.jira   = jira;
-        this.logSvc = logSvc;
-    }
 
     @PostMapping("/comment")
     public ResponseEntity<Map<String, Object>> comment(

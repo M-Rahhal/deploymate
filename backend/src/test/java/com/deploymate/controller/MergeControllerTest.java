@@ -35,7 +35,6 @@ class MergeControllerTest {
 
     private Map<String, String> validBody() {
         return Map.of(
-            "org",          "my-org",
             "repo",         "my-repo",
             "sourceBranch", "PROJ-123",
             "targetBranch", "env/staging",
@@ -85,7 +84,6 @@ class MergeControllerTest {
     @Test
     void merge_returns400_whenRepoIsEmpty() throws Exception {
         var body = Map.of(
-            "org",          "my-org",
             "repo",         "",
             "sourceBranch", "PROJ-1",
             "targetBranch", "main"
@@ -101,7 +99,6 @@ class MergeControllerTest {
     @Test
     void merge_returns400_whenRepoHasPathTraversal() throws Exception {
         var body = Map.of(
-            "org",          "my-org",
             "repo",         "../etc/passwd",
             "sourceBranch", "PROJ-1",
             "targetBranch", "main"
@@ -123,7 +120,6 @@ class MergeControllerTest {
     @Test
     void merge_returns400_whenTicketFormatInvalid() throws Exception {
         var body = Map.of(
-            "org",          "my-org",
             "repo",         "repo",
             "sourceBranch", "branch",
             "targetBranch", "main",

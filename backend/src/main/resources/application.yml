@@ -6,6 +6,17 @@ spring:
     name: deploymate
   jackson:
     default-property-inclusion: non_null
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/deploymate}
+    driver-class-name: org.postgresql.Driver
+    username: ${DATABASE_USER:deploymate}
+    password: ${DATABASE_PASSWORD:deploymate}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    open-in-view: false
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
 
 deploymate:
   github:

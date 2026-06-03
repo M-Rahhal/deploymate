@@ -5,13 +5,22 @@
  * This server holds NO credentials — it calls http://localhost:8080/api/... only.
  * The Spring Boot backend reads credentials from .env and performs all auth.
  *
- * Tools exposed:
- *   deploy_sdk      — merge branch + trigger Jenkins (SDK, uses BRANCH param)
- *   deploy_service  — merge + tag + trigger Jenkins (SERVICE, uses TAG param)
- *   deploy_all      — submit a full deployment batch to the backend orchestrator
- *   get_pipeline_status — poll a build queue item or build URL
- *   add_jira_comment    — post a comment to a Jira issue
- *   get_log             — tail the server-side deployment log
+ * Atomic tools (one endpoint each):
+ *   merge_branch          — verify + merge source → target
+ *   create_tag            — create a GitHub pre-release tag
+ *   trigger_pipeline      — trigger a Jenkins pipeline build
+ *   get_pipeline_status   — poll a build queue item or build URL
+ *   get_next_tag          — suggest next tag + last deployed tag from Jenkins
+ *   get_jenkins_categories — list saved Jenkins category prefixes
+ *   add_jira_comment      — post a comment to a Jira issue
+ *   get_log               — tail the server-side deployment log
+ *
+ * Composite/batch tool:
+ *   deploy_all — submit a full deployment batch to the orchestrator
+ *
+ * git_branch parameter strategy (enforced by the backend):
+ *   SERVICE rows → git_branch = tagName  (pre-release tag; tagName must be set)
+ *   SDK rows     → git_branch = "origin/" + targetBranch  (branch ref)
  */
 
 import { McpServer }           from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -22,7 +31,6 @@ import axios, { AxiosError }   from "axios";
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 const BASE = process.env["DEPLOYMATE_API_URL"] ?? "http://localhost:8080";
-const ORG  = process.env["GITHUB_ORG"]         ?? "";
 
 // ─── Axios client ─────────────────────────────────────────────────────────────
 
@@ -34,36 +42,30 @@ const http = axios.create({
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Redacts any credential-like tokens from text before returning to Claude.
- * Covers GitHub PATs, Basic-auth headers, Bearer tokens, and URL passwords.
- */
 function sanitize(text: string): string {
   return text
-    .replace(/ghp_[A-Za-z0-9]{36,}/g,          "[REDACTED-GH-TOKEN]")
-    .replace(/ghs_[A-Za-z0-9]{36,}/g,          "[REDACTED-GH-TOKEN]")
-    .replace(/Basic [A-Za-z0-9+/=]{20,}/g,     "[REDACTED-BASIC]")
-    .replace(/Bearer [A-Za-z0-9._\-]{20,}/g,   "[REDACTED-BEARER]")
-    .replace(/:[A-Za-z0-9._\-]{8,}@[a-z]/g,   "[REDACTED]@");
+    .replace(/ghp_[A-Za-z0-9]{36,}/g,         "[REDACTED-GH-TOKEN]")
+    .replace(/ghs_[A-Za-z0-9]{36,}/g,         "[REDACTED-GH-TOKEN]")
+    .replace(/Basic [A-Za-z0-9+/=]{20,}/g,    "[REDACTED-BASIC]")
+    .replace(/Bearer [A-Za-z0-9._\-]{20,}/g,  "[REDACTED-BEARER]")
+    .replace(/:[A-Za-z0-9._\-]{8,}@[a-z]/g,  "[REDACTED]@");
 }
 
-/** Build a text-only MCP content response. */
 function text(msg: string) {
   return { content: [{ type: "text" as const, text: sanitize(msg) }] };
 }
 
-/** Format an Axios/generic error safely — never leaks auth details. */
 function errText(context: string, err: unknown): ReturnType<typeof text> {
   if (err instanceof AxiosError) {
-    const status  = err.response?.status ?? "network error";
-    const apiMsg  = (err.response?.data as { message?: string } | undefined)?.message;
-    const detail  = apiMsg ? `: ${apiMsg}` : "";
+    const status = err.response?.status ?? "network error";
+    const apiMsg = (err.response?.data as { message?: string } | undefined)?.message;
+    const detail = apiMsg ? `: ${apiMsg}` : "";
     return text(`${context} failed (HTTP ${status}${detail}). Check the DeployMate activity log.`);
   }
   return text(`${context} failed. Check the DeployMate activity log.`);
 }
 
-// ─── Per-tool rate limiter (max calls / rolling 60-second window) ─────────────
+// ─── Per-tool rate limiter ────────────────────────────────────────────────────
 
 const callLog = new Map<string, number[]>();
 
@@ -78,210 +80,139 @@ function checkRateLimit(toolName: string, max = 10): boolean {
 }
 
 function rateLimitExceeded(): ReturnType<typeof text> {
-  return text("Rate limit exceeded (10 calls / minute). Wait a moment and retry.");
+  return text("Rate limit exceeded. Wait a moment and retry.");
 }
+
+// ─── Steps schema (reused across tools) ──────────────────────────────────────
+
+const stepsSchema = z.object({
+  mergeBranch:     z.boolean().describe("Merge source branch into target branch"),
+  createTag:       z.boolean().describe("Create a GitHub pre-release tag before triggering the pipeline"),
+  triggerPipeline: z.boolean().describe("Trigger the Jenkins pipeline"),
+  updateJira:      z.boolean().describe("Post Jira comments at each step"),
+});
 
 // ─── MCP server ───────────────────────────────────────────────────────────────
 
 const server = new McpServer({
   name:    "deploymate",
-  version: "1.0.0",
+  version: "2.0.0",
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Tool: deploy_sdk
-// Merges source → target branch, then triggers Jenkins with BRANCH=targetBranch.
-// skipMerge=true skips the merge and goes straight to pipeline.
+// Atomic tool: merge_branch
+// Calls POST /api/merge only. No pipeline, no tag.
 // ══════════════════════════════════════════════════════════════════════════════
 server.tool(
-  "deploy_sdk",
-  "Merge a branch and trigger Jenkins for an SDK. Uses BRANCH as the pipeline parameter.",
+  "merge_branch",
+  "Verify that a branch exists on GitHub and merge it into the target branch. Returns the merge commit SHA or reports a conflict.",
   {
-    name:         z.string().min(1).describe("Human-readable display name for the SDK"),
-    repo:         z.string().min(1).describe("GitHub repository name (not full URL)"),
-    sourceBranch: z.string().min(1).describe("Branch to merge FROM (e.g. feature/my-sdk)"),
-    targetBranch: z.string().min(1).optional().default("env/staging")
-                   .describe("Branch to merge INTO (default: env/staging)"),
-    jenkinsJob:   z.string().min(1).describe("Jenkins job path (e.g. sdk-team/my-sdk-deploy)"),
-    ticket:       z.string().optional().default("").describe("Jira ticket key (e.g. PROJ-123), optional"),
-    skipMerge:    z.boolean().optional().default(false)
-                   .describe("Skip merge+tag and go straight to pipeline with BRANCH parameter"),
-    updateJira:   z.boolean().optional().default(false).describe("Post a Jira comment after deploy"),
-  },
-  async (args) => {
-    if (!checkRateLimit("deploy_sdk")) return rateLimitExceeded();
-
-    try {
-      // Step 1: merge (unless skipped)
-      if (!args.skipMerge) {
-        const mergeRes = await http.post("/api/merge", {
-          org:          ORG,
-          repo:         args.repo,
-          sourceBranch: args.sourceBranch,
-          targetBranch: args.targetBranch,
-          ticket:       args.ticket,
-        });
-
-        if ((mergeRes.data as { conflict?: boolean }).conflict) {
-          return text(
-            `Merge conflict in ${args.name} (${args.repo}). ` +
-            `Resolve the conflict between ${args.sourceBranch} and ${args.targetBranch} manually, then retry.`
-          );
-        }
-      }
-
-      // Step 2: trigger pipeline with BRANCH parameter
-      const pipeRes = await http.post("/api/pipeline/trigger", {
-        jenkinsJob: args.jenkinsJob,
-        paramType:  "BRANCH",
-        paramValue: args.targetBranch,
-      });
-      const queueUrl = (pipeRes.data as { queueItemUrl?: string }).queueItemUrl;
-
-      const mergeNote = args.skipMerge ? "(merge skipped, deploy-only)" : "merged successfully";
-      return text(
-        `SDK ${args.name}: ${mergeNote}. ` +
-        `Jenkins job ${args.jenkinsJob} queued with BRANCH=${args.targetBranch}. ` +
-        (queueUrl ? `Queue URL: ${queueUrl}` : "")
-      );
-    } catch (err) {
-      return errText(`SDK deploy for ${args.name}`, err);
-    }
-  }
-);
-
-// ══════════════════════════════════════════════════════════════════════════════
-// Tool: deploy_service
-// Merges source → target, creates a pre-release tag, then triggers Jenkins
-// with TAG=tagName.  skipMerge=true bypasses merge+tag and uses BRANCH instead.
-// ══════════════════════════════════════════════════════════════════════════════
-server.tool(
-  "deploy_service",
-  "Merge branch, create a pre-release GitHub tag, and trigger Jenkins for a service. Uses TAG as the pipeline parameter (or BRANCH if skipMerge=true).",
-  {
-    name:         z.string().min(1).describe("Human-readable display name"),
     repo:         z.string().min(1).describe("GitHub repository name"),
     sourceBranch: z.string().min(1).describe("Branch to merge FROM"),
     targetBranch: z.string().min(1).optional().default("env/staging").describe("Branch to merge INTO"),
-    jenkinsJob:   z.string().min(1).describe("Jenkins job path"),
-    tagName:      z.string().min(1).describe("Explicit pre-release tag name (e.g. env-stag-20240601-my-svc-001)"),
-    ticket:       z.string().optional().default("").describe("Jira ticket key, optional"),
-    skipMerge:    z.boolean().optional().default(false)
-                   .describe("Skip merge+tag; trigger pipeline with BRANCH instead of TAG"),
-    updateJira:   z.boolean().optional().default(false),
+    ticket:       z.string().optional().default("").describe("Jira ticket key (e.g. PROJ-123), optional"),
   },
   async (args) => {
-    if (!checkRateLimit("deploy_service")) return rateLimitExceeded();
+    if (!checkRateLimit("merge_branch")) return rateLimitExceeded();
 
     try {
-      let releaseUrl: string | undefined;
+      const res = await http.post("/api/merge", {
+        repo:         args.repo,
+        sourceBranch: args.sourceBranch,
+        targetBranch: args.targetBranch,
+        ticket:       args.ticket,
+      });
 
-      if (!args.skipMerge) {
-        // Step 1: merge
-        const mergeRes = await http.post("/api/merge", {
-          org:          ORG,
-          repo:         args.repo,
-          sourceBranch: args.sourceBranch,
-          targetBranch: args.targetBranch,
-          ticket:       args.ticket,
-        });
-        if ((mergeRes.data as { conflict?: boolean }).conflict) {
-          return text(
-            `Merge conflict in ${args.name} (${args.repo}). ` +
-            `Resolve ${args.sourceBranch} ↔ ${args.targetBranch} manually, then retry.`
-          );
-        }
-
-        // Step 2: create pre-release tag
-        const tagRes = await http.post("/api/tag", {
-          org:          ORG,
-          repo:         args.repo,
-          tagName:      args.tagName,
-          targetBranch: args.targetBranch,
-          ticket:       args.ticket,
-        });
-        releaseUrl = (tagRes.data as { releaseUrl?: string }).releaseUrl;
+      const data = res.data as { conflict?: boolean; sha?: string; message?: string };
+      if (data.conflict) {
+        return text(
+          `Merge conflict in ${args.repo} (${args.sourceBranch} → ${args.targetBranch}). ` +
+          `Resolve the conflict manually, then retry.`
+        );
       }
 
-      // Step 3: trigger pipeline
-      const paramType = args.skipMerge ? "BRANCH" : "TAG";
-      const paramVal  = args.skipMerge ? args.targetBranch : args.tagName;
-
-      const pipeRes = await http.post("/api/pipeline/trigger", {
-        jenkinsJob: args.jenkinsJob,
-        paramType,
-        paramValue: paramVal,
-      });
-      const queueUrl = (pipeRes.data as { queueItemUrl?: string }).queueItemUrl;
-
-      const summary = args.skipMerge
-        ? `Service ${args.name}: merge skipped (deploy-only).`
-        : `Service ${args.name}: merged and tagged as ${args.tagName}.` +
-          (releaseUrl ? ` Release: ${releaseUrl}` : "");
-
       return text(
-        `${summary} Jenkins job ${args.jenkinsJob} queued with ${paramType}=${paramVal}. ` +
-        (queueUrl ? `Queue URL: ${queueUrl}` : "")
+        `Merged ${args.repo}: ${args.sourceBranch} → ${args.targetBranch}. ` +
+        `SHA: ${data.sha ?? "n/a"}`
       );
     } catch (err) {
-      return errText(`Service deploy for ${args.name}`, err);
+      return errText(`merge_branch for ${args.repo}`, err);
     }
   }
 );
 
 // ══════════════════════════════════════════════════════════════════════════════
-// Tool: deploy_all
-// Submits a full deployment batch (multiple SDKs + services) to the backend
-// orchestrator, which handles stage ordering and parallel execution.
+// Atomic tool: create_tag
+// Calls POST /api/tag only. Gets HEAD SHA of target branch, creates pre-release.
 // ══════════════════════════════════════════════════════════════════════════════
 server.tool(
-  "deploy_all",
-  "Submit a full deployment batch to the DeployMate backend orchestrator. Handles SDK stage ordering and service deployment automatically.",
+  "create_tag",
+  "Create a GitHub pre-release tag from the HEAD of the target branch. Returns the tag name and release URL.",
   {
-    ticket: z.string().optional().default("").describe("Jira ticket key applied to all services"),
-    rows: z.array(
-      z.object({
-        id:           z.string().describe("Unique row ID (generate a uuid if unknown)"),
-        name:         z.string().describe("Display name"),
-        repo:         z.string().describe("GitHub repo name"),
-        type:         z.enum(["SDK", "SERVICE"]).describe("SDK or SERVICE"),
-        stage:        z.number().int().min(1).describe("SDK deployment stage (1-based); ignored for SERVICE"),
-        sourceBranch: z.string().describe("Branch to merge FROM"),
-        targetBranch: z.string().describe("Branch to merge INTO"),
-        jenkinsJob:   z.string().describe("Jenkins job path"),
-        tagName:      z.string().describe("Pre-release tag name (SERVICE only)"),
-        updateJira:   z.boolean().describe("Post Jira comment after deploy"),
-        skipMerge:    z.boolean().describe("Skip merge+tag, deploy-only"),
-      })
-    ).min(1).describe("Array of services to deploy"),
+    repo:         z.string().min(1).describe("GitHub repository name"),
+    tagName:      z.string().min(1).describe("Tag name (e.g. env-stag-20240601-my-svc-001)"),
+    targetBranch: z.string().min(1).optional().default("env/staging").describe("Branch to tag from"),
+    ticket:       z.string().optional().default("").describe("Jira ticket key, optional"),
   },
   async (args) => {
-    if (!checkRateLimit("deploy_all", 5)) return rateLimitExceeded();
+    if (!checkRateLimit("create_tag")) return rateLimitExceeded();
 
     try {
-      await http.post("/api/deploy/all", {
-        ticket: args.ticket,
-        rows:   args.rows,
+      const res = await http.post("/api/tag", {
+        repo:         args.repo,
+        tagName:      args.tagName,
+        targetBranch: args.targetBranch,
+        ticket:       args.ticket,
       });
 
-      const sdkCount = args.rows.filter((r) => r.type === "SDK").length;
-      const svcCount = args.rows.filter((r) => r.type === "SERVICE").length;
-
+      const data = res.data as { tagName?: string; releaseUrl?: string };
       return text(
-        `Deployment batch accepted by DeployMate. ` +
-        `${sdkCount} SDK(s) and ${svcCount} service(s) queued. ` +
-        `Check the DeployMate UI or use get_log to monitor progress.`
+        `Tag ${data.tagName ?? args.tagName} created for ${args.repo}. ` +
+        (data.releaseUrl ? `Release: ${data.releaseUrl}` : "")
       );
     } catch (err) {
-      return errText("deploy_all", err);
+      return errText(`create_tag for ${args.repo}`, err);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Atomic tool: trigger_pipeline
+// Calls POST /api/pipeline/trigger only. Returns the Jenkins queue item URL.
+//
+// Jenkins always receives the parameter "git_branch".
+//   SDK:     gitBranch = "origin/{targetBranch}"  (branch to build)
+//   SERVICE: gitBranch = tagName                  (pre-release tag to deploy; tag must exist on GitHub)
+// ══════════════════════════════════════════════════════════════════════════════
+server.tool(
+  "trigger_pipeline",
+  "Trigger a Jenkins pipeline build. Jenkins receives a single 'git_branch' parameter. For SDKs pass 'origin/{branchName}'; for SERVICEs pass the pre-release tag name (e.g. v1.0.0rc2). Returns the queue item URL to poll with get_pipeline_status.",
+  {
+    jenkinsJob: z.string().min(1).describe("Jenkins job path (e.g. cross-products/staging/payment-service)"),
+    gitBranch:  z.string().min(1).describe("Value for the git_branch Jenkins parameter. SDK: 'origin/env/staging'. SERVICE: tag name e.g. 'v1.0.0rc2'"),
+  },
+  async (args) => {
+    if (!checkRateLimit("trigger_pipeline")) return rateLimitExceeded();
+
+    try {
+      const res = await http.post("/api/pipeline/trigger", {
+        jenkinsJob: args.jenkinsJob,
+        gitBranch:  args.gitBranch,
+      });
+
+      const data = res.data as { queueItemUrl?: string };
+      return text(
+        `Pipeline ${args.jenkinsJob} queued with git_branch=${args.gitBranch}. ` +
+        (data.queueItemUrl ? `Poll status at: ${data.queueItemUrl}` : "")
+      );
+    } catch (err) {
+      return errText(`trigger_pipeline for ${args.jenkinsJob}`, err);
     }
   }
 );
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Tool: get_pipeline_status
-// Polls either a Jenkins queue item URL (after trigger) or a build URL
-// (after the build starts) and returns the current state.
 // ══════════════════════════════════════════════════════════════════════════════
 server.tool(
   "get_pipeline_status",
@@ -323,14 +254,13 @@ server.tool(
 
 // ══════════════════════════════════════════════════════════════════════════════
 // Tool: add_jira_comment
-// Posts a deployment summary comment to a Jira issue.
 // ══════════════════════════════════════════════════════════════════════════════
 server.tool(
   "add_jira_comment",
   "Post a deployment summary comment to a Jira issue.",
   {
     issueKey: z.string().regex(/^[A-Z]{1,20}-[0-9]{1,10}$/).describe("Jira issue key (e.g. PROJ-123)"),
-    text:     z.string().min(1).max(5000).describe("Comment text (plain text; Atlassian Document Format applied by backend)"),
+    text:     z.string().min(1).max(5000).describe("Comment text (plain text; ADF applied by backend)"),
   },
   async (args) => {
     if (!checkRateLimit("add_jira_comment", 20)) return rateLimitExceeded();
@@ -348,9 +278,120 @@ server.tool(
 );
 
 // ══════════════════════════════════════════════════════════════════════════════
+// Tool: deploy_all
+// Submits a full batch to the backend orchestrator. Rows are executed in
+// stage order; same-stage rows run in parallel.
+// ══════════════════════════════════════════════════════════════════════════════
+server.tool(
+  "deploy_all",
+  "Submit a full deployment batch to the DeployMate backend orchestrator. Rows with the same stage number run in parallel; stages execute sequentially. Each row has its own steps configuration.",
+  {
+    ticket: z.string().optional().default("").describe("Jira ticket key applied to all rows"),
+    rows: z.array(
+      z.object({
+        id:           z.string().describe("Unique row ID (generate a uuid if unknown)"),
+        name:         z.string().describe("Display name"),
+        repo:         z.string().describe("GitHub repo name"),
+        type:         z.enum(["SDK", "SERVICE"]).describe("SDK or SERVICE — determines git_branch strategy: SERVICE uses tagName, SDK uses origin/targetBranch"),
+        stage:        z.number().int().min(1).describe("Execution stage (1-based); same stage = parallel"),
+        sourceBranch: z.string().describe("Branch to merge FROM"),
+        targetBranch: z.string().describe("Branch to merge INTO"),
+        jenkinsJob:   z.string().describe("Jenkins job path"),
+        tagName:      z.string().describe("Pre-release tag name — required for SERVICE rows (used as git_branch value for Jenkins)"),
+        steps:        stepsSchema.describe("Which steps to execute for this row"),
+      })
+    ).min(1).describe("Array of rows to deploy in stage order"),
+  },
+  async (args) => {
+    if (!checkRateLimit("deploy_all", 5)) return rateLimitExceeded();
+
+    try {
+      await http.post("/api/deploy/all", {
+        ticket: args.ticket,
+        rows:   args.rows,
+      });
+
+      const byStage = new Map<number, number>();
+      for (const r of args.rows) {
+        byStage.set(r.stage, (byStage.get(r.stage) ?? 0) + 1);
+      }
+      const stagesSummary = Array.from(byStage.entries())
+        .sort(([a], [b]) => a - b)
+        .map(([s, n]) => `Stage ${s}: ${n} row(s)`)
+        .join(", ");
+
+      return text(
+        `Deployment batch accepted. ${args.rows.length} row(s) queued. ` +
+        `${stagesSummary}. ` +
+        `Check the DeployMate UI or use get_log to monitor progress.`
+      );
+    } catch (err) {
+      return errText("deploy_all", err);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Tool: get_next_tag
+// Returns the suggested next pre-release tag for a repository.
+// ══════════════════════════════════════════════════════════════════════════════
+server.tool(
+  "get_next_tag",
+  "Get the suggested next pre-release tag for a GitHub repository and, optionally, the git_branch value from its last successful Jenkins build. Provide jenkinsJob to also see the last deployed tag.",
+  {
+    repo:       z.string().min(1).describe("GitHub repository name"),
+    jenkinsJob: z.string().optional().describe("Jenkins job path (e.g. team/staging/my-service) — when provided, also returns the last deployed git_branch value"),
+  },
+  async (args) => {
+    if (!checkRateLimit("get_next_tag")) return rateLimitExceeded();
+
+    try {
+      const params: Record<string, string> = { repo: args.repo };
+      if (args.jenkinsJob) params.jenkinsJob = args.jenkinsJob;
+
+      const res  = await http.get("/api/tag/next", { params });
+      const data = res.data as { tagName?: string; previousTag?: string; lastDeployedTag?: string | null };
+
+      const lines: string[] = [];
+      lines.push(`Suggested next tag for ${args.repo}: ${data.tagName ?? "v1.0.0rc1"}`);
+      if (data.previousTag) lines.push(`Latest GitHub tag: ${data.previousTag}`);
+      if (data.lastDeployedTag) lines.push(`Last Jenkins deploy (git_branch): ${data.lastDeployedTag}`);
+      else if (args.jenkinsJob)  lines.push(`Last Jenkins deploy: no successful build found for ${args.jenkinsJob}`);
+
+      return text(lines.join("\n"));
+    } catch (err) {
+      return errText(`get_next_tag for ${args.repo}`, err);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Tool: get_jenkins_categories
+// Returns all saved Jenkins category names. Used to discover available Jenkins
+// job folder prefixes before building a jenkinsJob path for deploy_all / trigger_pipeline.
+// ══════════════════════════════════════════════════════════════════════════════
+server.tool(
+  "get_jenkins_categories",
+  "List all Jenkins job categories (folder prefixes) that have been saved in DeployMate. Use this to discover the valid first segment of a jenkinsJob path (e.g. 'cross-products', 'platform') before calling trigger_pipeline or deploy_all.",
+  {},
+  async () => {
+    if (!checkRateLimit("get_jenkins_categories")) return rateLimitExceeded();
+
+    try {
+      const res  = await http.get("/api/jenkins/categories");
+      const cats = res.data as string[];
+      if (!cats.length) {
+        return text("No Jenkins categories saved yet. Add a service row in the UI to populate them.");
+      }
+      return text(`Saved Jenkins categories (${cats.length}): ${cats.join(", ")}`);
+    } catch (err) {
+      return errText("get_jenkins_categories", err);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════════════════════
 // Tool: get_log
-// Returns recent lines from the server-side deployment log, optionally
-// filtered by a service name substring.
 // ══════════════════════════════════════════════════════════════════════════════
 server.tool(
   "get_log",
@@ -391,8 +432,7 @@ server.tool(
 async function main(): Promise<void> {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  // Log to stderr so it doesn't pollute the stdio MCP channel
-  console.error(`[DeployMate MCP] Server started. API base: ${BASE}, org: ${ORG || "(unset)"}`);
+  console.error(`[DeployMate MCP] Server started. API base: ${BASE}`);
 }
 
 main().catch((err: unknown) => {

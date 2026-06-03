@@ -3,6 +3,7 @@ package com.deploymate.service;
 import com.deploymate.config.AppProperties;
 import com.deploymate.model.DeployException;
 import com.deploymate.model.ErrorCode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import okhttp3.OkHttpClient;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -47,7 +48,7 @@ class GitHubServiceTest {
             })
             .build();
 
-        service = new GitHubService(props, client);
+        service = new GitHubService(client, new ObjectMapper(), props);
     }
 
     @AfterEach
@@ -166,6 +167,7 @@ class GitHubServiceTest {
 
     @Test
     void createTag_createsRefThenRelease_returnsUrl() throws InterruptedException {
+        server.enqueue(new MockResponse().setResponseCode(404)); // tagExists → 404 (tag doesn't exist)
         server.enqueue(new MockResponse().setResponseCode(201).setBody("{}")); // ref
         server.enqueue(new MockResponse()
             .setResponseCode(201)
@@ -174,24 +176,75 @@ class GitHubServiceTest {
         var result = service.createTagAndPreRelease("repo", "v1.0.0", "abc123", "PROJ-1");
 
         assertThat(result.releaseUrl()).isEqualTo("https://github.com/org/repo/releases/tag/v1");
-        assertThat(server.getRequestCount()).isEqualTo(2);
+        assertThat(server.getRequestCount()).isEqualTo(3);
 
-        // First request should be creating the ref
+        server.takeRequest(); // tagExists check
+        // Second request should be creating the ref
         var refReq = server.takeRequest();
         assertThat(refReq.getBody().readUtf8()).contains("refs/tags/v1.0.0");
 
-        // Second request should be creating the release
+        // Third request should be creating the release
         var relReq = server.takeRequest();
         assertThat(relReq.getBody().readUtf8()).contains("prerelease");
     }
 
     @Test
     void createTag_throwsDeployException_whenRefCreationFails() {
+        server.enqueue(new MockResponse().setResponseCode(404)); // tagExists → 404 (tag doesn't exist)
         server.enqueue(new MockResponse().setResponseCode(422)); // ref creation fails
 
         assertThatThrownBy(() -> service.createTagAndPreRelease("repo", "bad", "sha", null))
             .isInstanceOf(DeployException.class)
             .extracting(e -> ((DeployException) e).getCode())
             .isEqualTo(ErrorCode.NETWORK);
+    }
+
+    @Test
+    void createTag_throwsInvalidInput_whenTagAlreadyExists() {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("{}"));  // tagExists → 200
+
+        assertThatThrownBy(() -> service.createTagAndPreRelease("repo", "v1.0.0rc1", "sha", null))
+            .isInstanceOf(DeployException.class)
+            .extracting(e -> ((DeployException) e).getCode())
+            .isEqualTo(ErrorCode.INVALID_INPUT);
+    }
+
+    @Test
+    void getLatestTag_returnsTagWithHighestId() {
+        server.enqueue(new MockResponse()
+            .setResponseCode(200)
+            .setBody("[" +
+                "{\"id\":200,\"tag_name\":\"v1.0.0rc3\",\"prerelease\":true}," +
+                "{\"id\":100,\"tag_name\":\"v1.0.0rc1\",\"prerelease\":true}," +
+                "{\"id\":150,\"tag_name\":\"v1.0.0rc2\",\"prerelease\":true}" +
+                "]"));
+
+        var tag = service.getLatestTag("repo");
+
+        assertThat(tag).isPresent().contains("v1.0.0rc3");
+    }
+
+    @Test
+    void getLatestTag_returnsEmpty_whenNoReleases() {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("[]"));
+
+        var tag = service.getLatestTag("repo");
+
+        assertThat(tag).isEmpty();
+    }
+
+    @Test
+    void createTag_createsRefThenRelease_withTagExistenceCheck() throws InterruptedException {
+        server.enqueue(new MockResponse().setResponseCode(404)); // tagExists → 404 (tag doesn't exist)
+        server.enqueue(new MockResponse().setResponseCode(201).setBody("{}")); // ref
+        server.enqueue(new MockResponse()
+            .setResponseCode(201)
+            .setBody("{\"html_url\": \"https://github.com/org/repo/releases/tag/v2\"}")); // release
+
+        var result = service.createTagAndPreRelease("repo", "v1.0.1rc1", "abc123", "PROJ-2");
+
+        assertThat(result.releaseUrl()).contains("v2");
+        // 3 requests total: tagExists + ref + release
+        assertThat(server.getRequestCount()).isEqualTo(3);
     }
 }

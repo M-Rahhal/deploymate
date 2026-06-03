@@ -3,6 +3,7 @@ package com.deploymate.service;
 import com.deploymate.config.AppProperties;
 import com.deploymate.model.DeployException;
 import com.deploymate.model.ErrorCode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import okhttp3.OkHttpClient;
 import okhttp3.mockwebserver.MockResponse;
 import okhttp3.mockwebserver.MockWebServer;
@@ -31,19 +32,20 @@ class JenkinsServiceTest {
             new AppProperties.Defaults("env/staging", "env-stag")
         );
 
-        service = new JenkinsService(props, new OkHttpClient());
-        // Override to use mock server: rebuild with proper base URL
-        service = new JenkinsService(props, new OkHttpClient.Builder()
-            .addInterceptor(chain -> {
-                var original = chain.request();
-                var newUrl   = original.url().newBuilder()
-                    .scheme("http")
-                    .host(server.getHostName())
-                    .port(server.getPort())
-                    .build();
-                return chain.proceed(original.newBuilder().url(newUrl).build());
-            })
-            .build());
+        service = new JenkinsService(
+            new OkHttpClient.Builder()
+                .addInterceptor(chain -> {
+                    var original = chain.request();
+                    var newUrl   = original.url().newBuilder()
+                        .scheme("http")
+                        .host(server.getHostName())
+                        .port(server.getPort())
+                        .build();
+                    return chain.proceed(original.newBuilder().url(newUrl).build());
+                })
+                .build(),
+            new ObjectMapper(),
+            props);
     }
 
     @AfterEach
@@ -62,7 +64,7 @@ class JenkinsServiceTest {
         server.enqueue(new MockResponse().setResponseCode(201)
             .setHeader("Location", "http://jenkins/queue/item/42/"));
 
-        var queueUrl = service.triggerBuild("backend/my-job", "BRANCH", "env/staging");
+        var queueUrl = service.triggerBuild("backend/my-job", "origin/env/staging");
 
         assertThat(queueUrl).isEqualTo("http://jenkins/queue/item/42/");
 
@@ -76,7 +78,7 @@ class JenkinsServiceTest {
     void triggerBuild_throwsAuthFailed_whenCrumbFails() {
         server.enqueue(new MockResponse().setResponseCode(403));
 
-        assertThatThrownBy(() -> service.triggerBuild("job", "BRANCH", "main"))
+        assertThatThrownBy(() -> service.triggerBuild("job", "origin/main"))
             .isInstanceOf(DeployException.class)
             .extracting(e -> ((DeployException) e).getCode())
             .isEqualTo(ErrorCode.AUTH_FAILED);
@@ -88,7 +90,7 @@ class JenkinsServiceTest {
             .setBody("{\"crumbRequestField\":\"Jenkins-Crumb\",\"crumb\":\"c\"}"));
         server.enqueue(new MockResponse().setResponseCode(201)); // no Location header
 
-        assertThatThrownBy(() -> service.triggerBuild("job", "TAG", "v1.0"))
+        assertThatThrownBy(() -> service.triggerBuild("job", "v1.0.0rc1"))
             .isInstanceOf(DeployException.class)
             .message().contains("Location");
     }
@@ -99,7 +101,7 @@ class JenkinsServiceTest {
             .setBody("{\"crumbRequestField\":\"Jenkins-Crumb\",\"crumb\":\"c\"}"));
         server.enqueue(new MockResponse().setResponseCode(500));
 
-        assertThatThrownBy(() -> service.triggerBuild("job", "BRANCH", "main"))
+        assertThatThrownBy(() -> service.triggerBuild("job", "origin/main"))
             .isInstanceOf(DeployException.class)
             .extracting(e -> ((DeployException) e).getCode())
             .isEqualTo(ErrorCode.NETWORK);
@@ -163,6 +165,35 @@ class JenkinsServiceTest {
             .isInstanceOf(DeployException.class)
             .extracting(e -> ((DeployException) e).getCode())
             .isEqualTo(ErrorCode.NETWORK);
+    }
+
+    // ── getLastDeployedBranch ────────────────────────────────────────────────
+
+    @Test
+    void getLastDeployedBranch_returnsTag_whenParameterPresent() {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("""
+            {"actions":[{"parameters":[{"name":"git_branch","value":"v1.0.0rc2"},{"name":"other","value":"x"}]}]}
+            """));
+
+        var result = service.getLastDeployedBranch("team/staging/my-service");
+
+        assertThat(result).isPresent().hasValue("v1.0.0rc2");
+    }
+
+    @Test
+    void getLastDeployedBranch_returnsEmpty_whenJobHasNoSuccessfulBuild() {
+        server.enqueue(new MockResponse().setResponseCode(404));
+
+        assertThat(service.getLastDeployedBranch("team/staging/missing-job")).isEmpty();
+    }
+
+    @Test
+    void getLastDeployedBranch_returnsEmpty_whenGitBranchParamAbsent() {
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("""
+            {"actions":[{"parameters":[{"name":"other_param","value":"something"}]}]}
+            """));
+
+        assertThat(service.getLastDeployedBranch("team/staging/my-service")).isEmpty();
     }
 
     // ── getBuildLog ───────────────────────────────────────────────────────────

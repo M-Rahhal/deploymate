@@ -4,11 +4,11 @@ export type ServiceType = 'SDK' | 'SERVICE';
 
 export type StepState =
   | 'IDLE'
-  | 'SKIPPED'    // Step was intentionally skipped (e.g. skipMerge=true)
+  | 'SKIPPED'
   | 'RUNNING'
   | 'DONE'
   | 'FAILED'
-  | 'CONFLICT';  // Merge-specific
+  | 'CONFLICT';
 
 export type OverallState =
   | 'IDLE'
@@ -22,20 +22,41 @@ export type OverallState =
   | 'DONE'
   | 'FAILED';
 
+/**
+ * Per-service step configuration.
+ * Each step is independently toggled.
+ * Pipeline param: createTag=true → TAG=tagName, false → BRANCH=targetBranch.
+ */
+export interface ServiceRowSteps {
+  mergeBranch:     boolean;
+  createTag:       boolean;
+  triggerPipeline: boolean;
+  updateJira:      boolean;
+}
+
+/** Controls whether the env segment of the Jenkins URL is derived from type or entered directly. */
+export type JenkinsEnvMode = 'type' | 'env';
+
 export interface ServiceRow {
   id: string;
-  name: string;           // Human-readable display name
-  repo: string;           // GitHub repo name (exact)
+  name: string;
+  repo: string;
   type: ServiceType;
-  stage: number;          // 1-based; ignored for SERVICE type
-  sourceBranch: string;   // Merge FROM
-  targetBranch: string;   // Merge INTO
-  jenkinsJob: string;     // e.g. "backend/my-sdk-deploy"
-  tagName: string;        // Auto-generated, editable; used for SERVICE only
-  updateJira: boolean;
-  skipMerge: boolean;     // When true: skip merge+tag, go straight to pipeline with BRANCH param
+  stage: number;
+  sourceBranch: string;
+  targetBranch: string;
+  jenkinsJob: string;  // computed: /job/{category}/job/{env}/job/{serviceName}/
 
-  // Per-step states
+  // Jenkins URL builder parts
+  jenkinsCategory:    string;  // first part, e.g. "cross-products"
+  jenkinsEnvMode:     JenkinsEnvMode;  // 'type' → SDK=dev, SERVICE=staging | 'env' → explicit
+  jenkinsEnv:         string;  // only used when jenkinsEnvMode === 'env' (dev | staging)
+  jenkinsServiceName: string;  // third part, e.g. "payment-eligibility-service"
+
+  tagName: string;
+  steps: ServiceRowSteps;
+
+  // Per-step runtime states
   mergeState:    StepState;
   tagState:      StepState;
   pipelineState: StepState;
@@ -57,31 +78,43 @@ export interface GlobalConfig {
 
 export interface ActivityLogEntry {
   id:        string;
-  timestamp: string;  // ISO 8601
+  timestamp: string;
   level:     'INFO' | 'WARN' | 'ERROR' | 'SUCCESS';
-  service:   string;  // display name or "SYSTEM"
-  stage:     string;  // "Stage 1", "Service", "SYSTEM"
+  service:   string;
+  stage:     string;
   message:   string;
 }
 
 // ─── Computed overall state ────────────────────────────────────────────────
 
 export function computeOverallState(row: ServiceRow): OverallState {
-  const { mergeState, tagState, pipelineState, type } = row;
+  const { mergeState, tagState, pipelineState, steps } = row;
 
   if (mergeState === 'CONFLICT') return 'CONFLICT';
-  if (mergeState === 'FAILED' || tagState === 'FAILED' || pipelineState === 'FAILED') return 'FAILED';
 
-  if (pipelineState === 'RUNNING') return 'PIPELINE_RUNNING';
-  if (pipelineState === 'DONE')    return 'DONE';
+  // Any configured step failed
+  if (
+    (steps.mergeBranch     && mergeState    === 'FAILED') ||
+    (steps.createTag       && tagState      === 'FAILED') ||
+    (steps.triggerPipeline && pipelineState === 'FAILED')
+  ) return 'FAILED';
 
-  if (type === 'SERVICE') {
-    if (tagState === 'RUNNING') return 'TAGGING';
-    if (tagState === 'DONE')    return 'TAGGED';
-  }
+  // Pipeline in-progress
+  if (steps.triggerPipeline && pipelineState === 'RUNNING') return 'PIPELINE_RUNNING';
 
-  if (mergeState === 'RUNNING')                             return 'MERGING';
-  if (mergeState === 'DONE' || mergeState === 'SKIPPED')    return 'MERGED';
+  // All configured steps done?
+  const mergeDone    = !steps.mergeBranch     || mergeState    === 'DONE' || mergeState    === 'SKIPPED';
+  const tagDone      = !steps.createTag       || tagState      === 'DONE' || tagState      === 'SKIPPED';
+  const pipelineDone = !steps.triggerPipeline || pipelineState === 'DONE' || pipelineState === 'SKIPPED';
+  if (mergeDone && tagDone && pipelineDone) return 'DONE';
+
+  // Tag in-progress / done
+  if (steps.createTag && tagState === 'RUNNING') return 'TAGGING';
+  if (steps.createTag && (tagState === 'DONE' || tagState === 'SKIPPED')) return 'TAGGED';
+
+  // Merge in-progress / done
+  if (steps.mergeBranch && mergeState === 'RUNNING') return 'MERGING';
+  if (steps.mergeBranch && (mergeState === 'DONE' || mergeState === 'SKIPPED')) return 'MERGED';
 
   return 'IDLE';
 }
@@ -89,7 +122,6 @@ export function computeOverallState(row: ServiceRow): OverallState {
 // ─── API shapes (must match backend DTOs exactly) ──────────────────────────
 
 export interface MergeRequest {
-  org:          string;
   repo:         string;
   sourceBranch: string;
   targetBranch: string;
@@ -104,7 +136,6 @@ export interface MergeResponse {
 }
 
 export interface TagRequest {
-  org:          string;
   repo:         string;
   tagName:      string;
   targetBranch: string;
@@ -121,8 +152,7 @@ export interface TagResponse {
 
 export interface PipelineTriggerRequest {
   jenkinsJob: string;
-  paramType:  'BRANCH' | 'TAG';
-  paramValue: string;
+  gitBranch:  string;  // value for Jenkins git_branch param
 }
 
 export interface PipelineTriggerResponse {
@@ -151,8 +181,7 @@ export interface ServiceRowDto {
   targetBranch: string;
   jenkinsJob:   string;
   tagName:      string;
-  updateJira:   boolean;
-  skipMerge:    boolean;
+  steps:        ServiceRowSteps;
 }
 
 export interface ApiError {
