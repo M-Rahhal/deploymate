@@ -1,5 +1,5 @@
 import { useState, useEffect, useId } from 'react';
-import { Trash2, GitMerge, Tag, Rocket, Play, ChevronDown, ChevronUp, RefreshCw, Loader2, GitCommit, Lock } from 'lucide-react';
+import { Trash2, GitMerge, Tag, Rocket, Play, ChevronDown, ChevronUp, RefreshCw, Loader2, GitCommit } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 import { Button }    from '@/components/ui/button';
@@ -26,6 +26,7 @@ import { StatusBadge }   from './StatusBadge';
 import { StepBadge }     from './StepBadge';
 import { ConflictPanel } from './ConflictPanel';
 import { BuildLogButton } from './BuildLogDrawer';
+import { ReadOnlyField }  from './ReadOnlyField';
 
 import type { ServiceRow as ServiceRowType, ServiceRowSteps, JenkinsEnvMode } from '@/types';
 
@@ -33,39 +34,8 @@ import type { ServiceRow as ServiceRowType, ServiceRowSteps, JenkinsEnvMode } fr
 interface ServiceRowProps {
   row:   ServiceRowType;
   index: number;
-}
-
-// ─── Read-only display field (registry-locked values) ────────────────────────
-
-interface ReadOnlyFieldProps {
-  value:       string;
-  placeholder?: string;
-  monospace?:  boolean;
-  className?:  string;
-}
-
-function ReadOnlyField({ value, placeholder = '—', monospace = false, className = '' }: ReadOnlyFieldProps) {
-  return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <div
-          className={
-            `flex h-7 cursor-default select-none items-center gap-1.5 rounded-md ` +
-            `border border-slate-700/50 bg-slate-800/40 px-2 text-xs ` +
-            `${monospace ? 'font-mono' : ''} ${className}`
-          }
-        >
-          <span className={`truncate ${value ? 'text-slate-300' : 'text-slate-600'}`}>
-            {value || placeholder}
-          </span>
-          <Lock className="ml-auto h-3 w-3 shrink-0 text-slate-700" />
-        </div>
-      </TooltipTrigger>
-      <TooltipContent side="top" className="text-xs">
-        Set from service registry
-      </TooltipContent>
-    </Tooltip>
-  );
+  /** When true: removes card border/shadow/rounded — for rendering inside a modal. */
+  flat?: boolean;
 }
 
 // ─── Jenkins URL builder sub-component ────────────────────────────────────────
@@ -223,7 +193,7 @@ function JenkinsBuilder({ row, disabled, fromRegistry, onField }: JenkinsBuilder
 
 // ─── Main ServiceRow component ────────────────────────────────────────────────
 
-export function ServiceRow({ row, index }: ServiceRowProps) {
+export function ServiceRow({ row, index, flat = false }: ServiceRowProps) {
   const { updateRow, updateSteps, removeRow } = useDeployStore();
   const { entries: registryEntries, repoNames, loaded: registryLoaded, missing: registryMissing } = useServiceRegistry();
   const { run: runMerge,    running: mR }  = useMergeAction(row);
@@ -295,12 +265,12 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
 
   return (
     <motion.div
-      layout
-      initial={{ opacity: 0, y: -8 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.98 }}
-      transition={{ duration: 0.15 }}
-      className="rounded-lg border border-slate-800 bg-slate-900 shadow-sm"
+      layout={!flat}
+      initial={flat ? false as const : { opacity: 0, y: -8 }}
+      animate={flat ? {} : { opacity: 1, y: 0 }}
+      exit={flat ? {} : { opacity: 0, scale: 0.98 }}
+      transition={flat ? undefined : { duration: 0.15 }}
+      className={flat ? '' : 'rounded-lg border border-slate-800 bg-slate-900 shadow-sm'}
     >
       {/* ── Header ──────────────────────────────────────────────────────── */}
       <div className="flex items-center gap-3 px-4 py-3">
@@ -359,14 +329,16 @@ export function ServiceRow({ row, index }: ServiceRowProps) {
 
         <StatusBadge state={overall} className="shrink-0" />
 
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 w-7 shrink-0 p-0 text-slate-500"
-          onClick={() => setExpanded((v) => !v)}
-        >
-          {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-        </Button>
+        {!flat && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 shrink-0 p-0 text-slate-500"
+            onClick={() => setExpanded((v) => !v)}
+          >
+            {expanded ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+          </Button>
+        )}
 
         <Button
           variant="ghost"

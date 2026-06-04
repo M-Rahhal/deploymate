@@ -11,7 +11,7 @@ interface DeployStore {
   activityLog:  ActivityLogEntry[];
 
   setGlobalConfig: (patch: Partial<GlobalConfig>) => void;
-  addRow:          () => void;
+  addRow:          (initial?: Partial<ServiceRow>) => void;
   removeRow:       (id: string) => void;
   updateRow:       (id: string, patch: Partial<ServiceRow>) => void;
   updateSteps:     (id: string, patch: Partial<ServiceRowSteps>) => void;
@@ -83,8 +83,12 @@ export const useDeployStore = create<DeployStore>()(
     setGlobalConfig: (patch) =>
       set((s) => { Object.assign(s.globalConfig, patch); }),
 
-    addRow: () =>
-      set((s) => { s.rows.push(blankRow(s.globalConfig)); }),
+    addRow: (initial) =>
+      set((s) => {
+        const row = blankRow(s.globalConfig);
+        if (initial) Object.assign(row, initial);
+        s.rows.push(row);
+      }),
 
     removeRow: (id) =>
       set((s) => { s.rows = s.rows.filter((r) => r.id !== id); }),
