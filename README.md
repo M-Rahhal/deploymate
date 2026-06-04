@@ -513,72 +513,146 @@ Runs 18 checks against a live server: SPA routing, log endpoint, input validatio
 
 ## 9. MCP server (Claude integration)
 
-The MCP server lets Claude drive deployments directly from a Claude Code terminal session. It is a separate Node.js process that talks to the running DeployMate backend — it holds no credentials of its own.
+The MCP (Model Context Protocol) server exposes every DeployMate capability as a tool that Claude can call directly from a Claude Code terminal session. This means you can describe a deployment in plain English and Claude will execute each step — merging branches, creating tags, triggering Jenkins, polling build status, posting Jira comments — using the same backend that powers the UI.
 
-### Start the MCP server
+The MCP server is a **separate Node.js process** that communicates with the running DeployMate backend over HTTP. It holds **no credentials of its own**; all authentication happens in the Spring Boot backend using the values you put in `.env`.
+
+---
+
+### What Claude can do with this integration
+
+With the MCP server connected, Claude can:
+
+- **Inspect before acting** — check what commit is currently on a branch, what the latest GitHub release tag is, and what tag was last deployed to Jenkins, all before touching anything.
+- **Execute individual steps** — merge a single branch, create a tag, or fire one pipeline without a full batch run.
+- **Run a full orchestrated deployment** — submit a multi-repo, multi-stage batch in one call and receive a structured summary when it finishes.
+- **Monitor progress** — tail the deployment log, filter by service name, and report back whether a build passed or failed.
+- **Post Jira updates** — write structured comments on a ticket at any point during the process.
+- **Manage Jenkins config** — save new Jenkins categories and service names so they appear in the UI dropdowns.
+
+---
+
+### Step 1 — Build the MCP server
 
 ```bash
 cd mcp
 npm install       # first time only
-npm run dev       # development (tsx, restarts on file change)
-# or
-npm run build && npm start   # production
+npm run build     # compiles TypeScript → dist/server.js
 ```
 
-The server communicates over **stdio** (standard input/output), which is how the MCP protocol works.
+> **Dev mode (skip the build):** If you want to run directly from source without a build step, use the locally installed `tsx` binary instead:
+> ```json
+> "command": "/absolute/path/to/deploymate/mcp/node_modules/.bin/tsx",
+> "args":    ["/absolute/path/to/deploymate/mcp/server.ts"]
+> ```
 
-### Register with Claude Code
+---
 
-Add the following to your Claude Code MCP configuration file (`~/.claude/claude_desktop_config.json` or `~/.config/claude/claude_code_config.json`):
+### Step 2 — Register with Claude Code
+
+Claude Code reads MCP server configuration from **`~/.claude/settings.json`**. Open that file and add the `mcpServers` block (keep any existing keys such as `theme`):
 
 ```json
 {
+  "theme": "dark-ansi",
   "mcpServers": {
     "deploymate": {
       "command": "node",
-      "args": ["/absolute/path/to/deploymate/mcp/dist/server.js"]
+      "args": ["/absolute/path/to/deploymate/mcp/dist/server.js"],
+      "env": {
+        "DEPLOYMATE_API_URL": "http://localhost:8080"
+      }
     }
   }
 }
 ```
 
-Or using `tsx` for development (no build step required):
+Replace `/absolute/path/to/deploymate` with the actual path on your machine. `DEPLOYMATE_API_URL` is optional and defaults to `http://localhost:8080` — set it only if you run the backend on a different port.
 
-```json
-{
-  "mcpServers": {
-    "deploymate": {
-      "command": "npx",
-      "args": ["tsx", "/absolute/path/to/deploymate/mcp/server.ts"]
-    }
-  }
-}
+> ⚠️ Do **not** add GitHub, Jenkins, or Jira credentials to this file. The MCP server never touches those APIs directly; all calls go through the DeployMate backend which reads credentials from `.env`.
+
+After saving, restart Claude Code (quit and reopen) or run `/mcp` in the terminal to reload servers. You should see:
+
+```
+deploymate  ● connected  13 tools
 ```
 
-> ⚠️ Do **not** add any `env` block with credentials here. The MCP server calls `http://localhost:8080` and the backend handles all authentication.
+---
 
 ### Available tools
 
-Once registered, Claude can use these tools:
-
 | Tool | What it does |
 |------|-------------|
-| `merge_branch` | Verify a branch exists on GitHub and merge it into the target branch |
-| `create_tag` | Create a GitHub pre-release tag from the HEAD of the target branch |
-| `trigger_pipeline` | Trigger a Jenkins build — SERVICE: passes the tag name; SDK: passes `origin/<branch>` |
-| `get_pipeline_status` | Poll a Jenkins queue item or build URL for current status |
-| `get_next_tag` | Get the suggested next tag (from GitHub releases) and the last deployed tag (from Jenkins) |
-| `get_jenkins_categories` | List saved Jenkins job category prefixes |
-| `add_jira_comment` | Post a comment to a Jira issue |
-| `get_log` | Fetch recent log lines from the server, optionally filtered by service name |
-| `deploy_all` | Submit a full batch deployment to the backend orchestrator (stage-ordered, parallel within stage) |
+| `get_branch_commit_info` | Fetch the latest commit SHA, author, message, and timestamp for any branch — use this to verify a branch is in the expected state before merging |
+| `get_next_tag` | Suggest the next pre-release tag name based on the latest GitHub release, and optionally show the `git_branch` value from the last successful Jenkins build |
+| `merge_branch` | Verify a branch exists on GitHub and merge it into the target branch; returns the merge commit SHA or reports a conflict |
+| `create_tag` | Create a lightweight git tag and a GitHub pre-release from the HEAD of the target branch |
+| `trigger_pipeline` | Trigger a Jenkins build with the `git_branch` parameter — SERVICE rows pass the tag name, SDK rows pass `origin/<targetBranch>` |
+| `get_pipeline_status` | Poll a Jenkins queue item or build URL; returns current state (QUEUED / RUNNING / SUCCESS / FAILURE) and the last log fragment |
+| `add_jira_comment` | Post a plain-text comment to a Jira issue (the backend converts it to ADF automatically) |
+| `get_jenkins_categories` | List all Jenkins job category prefixes saved in DeployMate |
+| `save_jenkins_category` | Persist a new Jenkins category so it appears in the UI dropdown |
+| `get_jenkins_service_names` | List all service names saved under a given category |
+| `save_jenkins_service_name` | Persist a service name under a category so it appears in the UI dropdown |
+| `deploy_all` | Submit a full multi-repo deployment batch; rows with the same stage number run in parallel, stages execute sequentially; returns immediately with 202 and runs in the background |
+| `get_log` | Fetch recent lines from the server-side deployment log, optionally filtered by service name |
 
-The `git_branch` Jenkins parameter strategy, enforced by the backend:
-- **SERVICE rows** → `git_branch = <tagName>` (the pre-release tag; must be set before triggering)
-- **SDK rows** → `git_branch = origin/<targetBranch>` (branch ref)
+---
 
-Example prompt to Claude:
-> *"Deploy the payment-service from feature/PROJ-123-new-checkout to env/staging using Jenkins job team/staging/payment-service. Ticket is PROJ-123."*
+### Prompt example — full multi-stage deployment
+
+This example shows a realistic deployment with two SDKs in stage 1 and one service in stage 2. Paste it directly into Claude Code (with the MCP server connected and the DeployMate backend running):
+
+---
+
+> I need to deploy ticket **PROJ-247** to staging. The backend is running at `http://localhost:8080`.
+>
+> Here are the repositories and their order:
+>
+> **Stage 1 — run these two in parallel first:**
+>
+> 1. **`client-sdk`** (SDK)
+>    - Merge `feature/PROJ-247-new-auth` → `env/staging`
+>    - Trigger Jenkins job `cross-products/dev/client-sdk`
+>
+> 2. **`models-sdk`** (SDK)
+>    - Merge `feature/PROJ-247-new-auth` → `env/staging`
+>    - Trigger Jenkins job `cross-products/dev/models-sdk`
+>
+> **Stage 2 — only after both SDKs are done:**
+>
+> 3. **`auth-service`** (SERVICE)
+>    - Merge `feature/PROJ-247-new-auth` → `env/staging`
+>    - Create a pre-release tag (suggest the next one automatically)
+>    - Trigger Jenkins job `platform/staging/auth-service` using the new tag
+>
+> For all three repos, post Jira comments on **PROJ-247** at each step (merge done, tag created, build started, build result).
+>
+> If any merge conflict is detected, stop and tell me which repo failed so I can resolve it manually before retrying.
+>
+> When everything is done, post a final summary comment on PROJ-247 listing what was deployed and whether all builds passed.
+
+---
+
+**What Claude will do with that prompt:**
+
+1. Call `get_next_tag` for `auth-service` to determine the tag name before submitting anything.
+2. Call `deploy_all` with all three rows configured at the correct stages, steps, and Jenkins jobs.
+3. Poll `get_log` periodically and report progress as each stage completes.
+4. If a conflict or build failure occurs, surface the error message and wait for your instruction.
+5. Call `add_jira_comment` with a final deployment summary once all stages are done.
+
+---
+
+### Prompt example — step-by-step (manual control)
+
+If you prefer to drive each step individually rather than submitting a full batch:
+
+> Check what commit is currently on `feature/PROJ-247-new-auth` in `auth-service`, then merge it into `env/staging`. If the merge succeeds, suggest the next pre-release tag.
+
+> The merge is done. Create a pre-release tag `v1.2.0rc3` for `auth-service` from `env/staging`.
+
+> Trigger the Jenkins job `platform/staging/auth-service` with tag `v1.2.0rc3` and poll it every 30 seconds until it finishes. Post the result to Jira issue PROJ-247.
 
 ---
 
@@ -628,7 +702,7 @@ deploymate/
 ├── mcp/                      ← MCP stdio server (Node.js + TypeScript)
 │   ├── package.json
 │   ├── tsconfig.json
-│   └── server.ts             ← 9 tools; rate limiter; credential sanitizer
+│   └── server.ts             ← 13 tools; rate limiter; credential sanitizer
 │
 ├── scripts/
 │   └── smoke-test.sh         ← 18 checks against a live server
