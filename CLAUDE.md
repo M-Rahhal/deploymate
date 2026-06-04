@@ -1646,6 +1646,71 @@ docker exec deploymate cat /app/logs/deploymate.log
 
 ## 13. Running Locally
 
+### Service Registry — `services.json`
+
+The frontend uses a **local JSON file** to populate the repository dropdown in each service row. This file is **gitignored** — every developer maintains their own copy and it is never committed.
+
+#### File location
+
+```
+frontend/public/services.json        ← your local copy (gitignored)
+frontend/public/services.example.json ← committed template
+```
+
+#### First-time setup
+
+```bash
+cp frontend/public/services.example.json frontend/public/services.json
+```
+
+Then open `frontend/public/services.json` and add an entry for every repository you deploy:
+
+```json
+{
+  "services": {
+    "my-backend-service": {
+      "displayName":        "My Backend Service",
+      "type":               "SERVICE",
+      "jenkinsCategory":    "cross-products",
+      "jenkinsServiceName": "my-backend-service"
+    },
+    "my-client-sdk": {
+      "displayName":        "My Client SDK",
+      "type":               "SDK",
+      "jenkinsCategory":    "cross-products",
+      "jenkinsServiceName": "my-client-sdk"
+    }
+  }
+}
+```
+
+**Field reference:**
+
+| Field | What it maps to |
+|---|---|
+| key (top-level) | GitHub repository name — must match exactly |
+| `displayName` | Human-readable label shown in the row header |
+| `type` | `SERVICE` (tagged deploy) or `SDK` (branch build) |
+| `jenkinsCategory` | First segment of the Jenkins job path |
+| `jenkinsServiceName` | Third segment (after the env segment) |
+
+The resulting Jenkins path is: `<jenkinsCategory> / <env> / <jenkinsServiceName>`  
+where `<env>` is `staging` for SERVICE and `dev` for SDK (overridable per row with "By env" mode).
+
+#### Runtime behaviour
+
+The app fetches `services.json` once at startup. If the file is missing, the repo dropdown shows a message explaining how to create it — the rest of the UI still works. Any edit to `services.json` takes effect on the next browser refresh.
+
+#### Docker
+
+When running via `docker compose`, mount the file into the container as a static asset:
+
+```yaml
+# In docker-compose.yml, under the deploymate service:
+volumes:
+  - ./frontend/public/services.json:/app/static/services.json:ro
+```
+
 ### Prerequisites
 
 | Tool | Min Version |

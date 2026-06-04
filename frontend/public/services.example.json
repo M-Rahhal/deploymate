@@ -1,0 +1,16 @@
+{
+  "services": {
+    "example-backend-service": {
+      "displayName": "Example Backend Service",
+      "type": "SERVICE",
+      "jenkinsCategory": "my-team",
+      "jenkinsServiceName": "example-backend-service"
+    },
+    "example-client-sdk": {
+      "displayName": "Example Client SDK",
+      "type": "SDK",
+      "jenkinsCategory": "my-team",
+      "jenkinsServiceName": "example-client-sdk"
+    }
+  }
+}

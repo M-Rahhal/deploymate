@@ -189,3 +189,27 @@ export interface ApiError {
   message: string;
   details?: string[];
 }
+
+// ─── SSE event payloads from GET /api/deploy/stream ───────────────────────
+
+export interface DeployLogEvent {
+  level:       ActivityLogEntry['level'];
+  serviceName: string;
+  stageLabel:  string;
+  message:     string;
+}
+
+export interface DeployStepUpdateEvent {
+  rowId:        string;
+  step:         'merge' | 'tag' | 'pipeline';
+  state:        StepState;
+  commitSha?:   string;
+  releaseUrl?:  string;
+  buildUrl?:    string;
+  buildNumber?: number;
+  errorMessage?: string;
+}
+
+export interface DeployDoneEvent {
+  success: boolean;
+}

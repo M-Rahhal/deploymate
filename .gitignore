@@ -2,6 +2,9 @@
 .env
 *.env.local
 
+# Local service registry — each developer fills this in themselves; never commit
+frontend/public/services.json
+
 # Build artifacts
 backend/target/
 frontend/node_modules/

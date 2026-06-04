@@ -11,11 +11,12 @@
 3. [Prerequisites](#3-prerequisites)
 4. [Quick start with Docker (recommended)](#4-quick-start-with-docker-recommended)
 5. [Environment file — all properties explained](#5-environment-file--all-properties-explained)
-6. [Local development (without Docker)](#6-local-development-without-docker)
-7. [Running the tests](#7-running-the-tests)
-8. [MCP server (Claude integration)](#8-mcp-server-claude-integration)
-9. [Project structure](#9-project-structure)
-10. [Troubleshooting](#10-troubleshooting)
+6. [Service registry — services.json](#6-service-registry--servicesjson)
+7. [Local development (without Docker)](#7-local-development-without-docker)
+8. [Running the tests](#8-running-the-tests)
+9. [MCP server (Claude integration)](#9-mcp-server-claude-integration)
+10. [Project structure](#10-project-structure)
+11. [Troubleshooting](#11-troubleshooting)
 
 ---
 
@@ -117,7 +118,40 @@ TAG_PREFIX=env-stag
 
 > ⚠️ The `.env` file is in `.gitignore`. It will never be committed. Never put credentials anywhere else.
 
-### Step 4 — Build and start
+### Step 4 — Create your `services.json`
+
+The repository dropdown in the UI is driven by a local JSON file that you fill in once and never commit. This file is **gitignored** — every developer keeps their own copy.
+
+```bash
+cp frontend/public/services.example.json frontend/public/services.json
+```
+
+Open `frontend/public/services.json` and add an entry for every repository you deploy:
+
+```json
+{
+  "services": {
+    "payment-service": {
+      "displayName":        "Payment Service",
+      "type":               "SERVICE",
+      "jenkinsCategory":    "cross-products",
+      "jenkinsServiceName": "payment-service"
+    },
+    "client-sdk": {
+      "displayName":        "Client SDK",
+      "type":               "SDK",
+      "jenkinsCategory":    "cross-products",
+      "jenkinsServiceName": "client-sdk"
+    }
+  }
+}
+```
+
+See [Section 6](#6-service-registry--servicesjson) for the full field reference.
+
+> ⚠️ `frontend/public/services.json` is in `.gitignore`. It will never be committed. Each developer maintains their own copy.
+
+### Step 5 — Build and start
 
 ```bash
 docker compose up --build
@@ -134,7 +168,7 @@ The first build takes a few minutes (it downloads Node modules and Maven depende
  ✔ Container deploymate  Started
 ```
 
-### Step 5 — Open the app
+### Step 6 — Open the app
 
 ```
 http://localhost:8080
@@ -276,7 +310,115 @@ TAG_PREFIX=env-stag
 
 ---
 
-## 6. Local development (without Docker)
+## 6. Service registry — services.json
+
+The repository dropdown in every service row is powered by a **local JSON file** that lives outside version control. This keeps your team's internal repository names and Jenkins job paths off GitHub while still letting everyone configure their own copy.
+
+### File locations
+
+```
+frontend/public/services.example.json   ← committed template, safe to edit
+frontend/public/services.json           ← your local copy (gitignored, never committed)
+```
+
+### First-time setup
+
+```bash
+cp frontend/public/services.example.json frontend/public/services.json
+```
+
+Then open `frontend/public/services.json` in any text editor.
+
+### File format
+
+```json
+{
+  "services": {
+    "<github-repo-name>": {
+      "displayName":        "Human-readable name shown in the UI",
+      "type":               "SERVICE",
+      "jenkinsCategory":    "first-segment-of-jenkins-job-path",
+      "jenkinsServiceName": "third-segment-of-jenkins-job-path"
+    }
+  }
+}
+```
+
+### Field reference
+
+| Field | Required | Description                                                                                                                                      |
+|-------|----------|--------------------------------------------------------------------------------------------------------------------------------------------------|
+| Key (top level) | ✓ | GitHub repository name — must match exactly, case-sensitive                                                                                      |
+| `displayName` | ✓ | Label shown in the row header                                                                                                                    |
+| `type` | ✓ | `SERVICE` — deploys from a pre-release tag and uses the staging path for jenkins; `SDK` — builds from a branch and uses the dev path for jenkins |
+| `jenkinsCategory` | ✓ | First path segment of the Jenkins job (the team/org folder)                                                                                      |
+| `jenkinsServiceName` | ✓ | Third path segment (after the environment segment)                                                                                               |
+
+The Jenkins job path DeployMate constructs is:
+
+```
+<jenkinsCategory> / <env> / <jenkinsServiceName>
+```
+
+where `<env>` is `staging` for SERVICE rows and `dev` for SDK rows by default. You can override this per row using the **"By env"** toggle.
+
+### Example
+
+```json
+{
+  "services": {
+    "payment-service": {
+      "displayName":        "Payment Service",
+      "type":               "SERVICE",
+      "jenkinsCategory":    "cross-products",
+      "jenkinsServiceName": "payment-service"
+    },
+    "auth-service": {
+      "displayName":        "Auth Service",
+      "type":               "SERVICE",
+      "jenkinsCategory":    "platform",
+      "jenkinsServiceName": "auth-service"
+    },
+    "client-sdk": {
+      "displayName":        "Client SDK",
+      "type":               "SDK",
+      "jenkinsCategory":    "cross-products",
+      "jenkinsServiceName": "client-sdk"
+    }
+  }
+}
+```
+
+This produces the Jenkins paths:
+- `cross-products/staging/payment-service`
+- `platform/staging/auth-service`
+- `cross-products/dev/client-sdk`
+
+### How the UI uses it
+
+When the app starts, it fetches `services.json` once. Selecting a repository from the dropdown auto-fills the display name, type, Jenkins category, and Jenkins service name — those fields become read-only (shown with a lock icon). Stage, source branch, target branch, tag name, and step toggles remain editable per deployment.
+
+If `services.json` is missing, the dropdown shows a message explaining how to create it. The rest of the UI continues to work normally.
+
+Any change to `services.json` takes effect on the next browser refresh — no rebuild needed.
+
+### Docker: mounting the file
+
+When running via `docker compose`, the built image does not contain your `services.json` (it is gitignored and therefore not present at build time). Mount it at runtime instead:
+
+```yaml
+# docker-compose.yml — under the deploymate service
+volumes:
+  - deploymate_logs:/app/logs
+  - deploymate_data:/app/data
+  - ./frontend/public/services.json:/app/static/services.json:ro
+```
+
+Spring Boot serves `/app/static/` as static files, so the frontend fetches it from `/services.json` as usual.
+
+---
+
+## 7. Local development (without Docker)
 
 This mode runs the backend and frontend as two separate processes. The frontend proxies `/api` requests to the backend automatically.
 
@@ -310,6 +452,11 @@ The backend starts on **port 8080**.
 ```bash
 cd frontend
 npm install       # first time only
+
+# Create your service registry if you haven't already:
+cp public/services.example.json public/services.json
+# Then edit public/services.json and add your repositories
+
 npm run dev
 ```
 
@@ -321,7 +468,7 @@ All `/api/*` requests from the browser are automatically proxied to `http://loca
 
 ---
 
-## 7. Running the tests
+## 8. Running the tests
 
 Tests run against the **backend only**. The frontend has TypeScript type checking.
 
@@ -364,7 +511,7 @@ Runs 18 checks against a live server: SPA routing, log endpoint, input validatio
 
 ---
 
-## 8. MCP server (Claude integration)
+## 9. MCP server (Claude integration)
 
 The MCP server lets Claude drive deployments directly from a Claude Code terminal session. It is a separate Node.js process that talks to the running DeployMate backend — it holds no credentials of its own.
 
@@ -435,7 +582,7 @@ Example prompt to Claude:
 
 ---
 
-## 9. Project structure
+## 10. Project structure
 
 ```
 deploymate/
@@ -443,6 +590,7 @@ deploymate/
 ├── .env.example              ← Template — copy to .env and fill in
 ├── .env                      ← Your credentials (git-ignored, never committed)
 ├── .gitignore
+│
 ├── Dockerfile                ← 3-stage build: Node → JDK → JRE
 ├── docker-compose.yml        ← Single container, reads .env, persists logs
 ├── README.md
@@ -468,9 +616,12 @@ deploymate/
 ├── frontend/                 ← React 19, Vite 6, TypeScript 5, Tailwind CSS
 │   ├── package.json
 │   ├── vite.config.ts        ← /api proxy to :8080; build output → backend/static
+│   ├── public/
+│   │   ├── services.example.json  ← committed template — copy to services.json
+│   │   └── services.json          ← your local registry (git-ignored, never committed)
 │   └── src/
 │       ├── components/       All UI components
-│       ├── hooks/            useDeployStore (Zustand), useDeployActions
+│       ├── hooks/            useDeployStore (Zustand), useDeployActions, useServiceRegistry
 │       ├── lib/              api.ts (fetch wrappers), utils.ts
 │       └── types/            index.ts (all TypeScript types)
 │
@@ -488,7 +639,7 @@ deploymate/
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 ### The container starts but I see "Application failed to start"
 

@@ -3,6 +3,7 @@ package com.deploymate.controller;
 import com.deploymate.dto.ServiceRowDto;
 import com.deploymate.dto.ServiceRowDto.ServiceType;
 import com.deploymate.dto.ServiceRowDto.Steps;
+import com.deploymate.service.DeploymentEventPublisher;
 import com.deploymate.service.LogService;
 import com.deploymate.service.OrchestratorService;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -27,8 +28,9 @@ class DeployControllerTest {
     @Autowired MockMvc      mvc;
     @Autowired ObjectMapper mapper;
 
-    @MockBean OrchestratorService orchestrator;
-    @MockBean LogService          logSvc;
+    @MockBean OrchestratorService      orchestrator;
+    @MockBean DeploymentEventPublisher eventPublisher;
+    @MockBean LogService               logSvc;
 
     private ServiceRowDto validRow() {
         return new ServiceRowDto(

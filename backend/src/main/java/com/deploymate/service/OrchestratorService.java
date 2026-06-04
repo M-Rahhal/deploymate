@@ -227,7 +227,7 @@ public class OrchestratorService {
     // Orchestrate All — unified stage-based deployment
     // ─────────────────────────────────────────────────────────────────────────
 
-    public void orchestrateDeployment(List<ServiceRowDto> rows, String ticket, StepCallback eventCallback) {
+    public boolean orchestrateDeployment(List<ServiceRowDto> rows, String ticket, StepCallback eventCallback) {
         deploymentLogger.info("SYSTEM", "—",
             "═══ NEW DEPLOY SESSION ═══ Ticket: " + (ticket != null ? ticket : "(none)"));
         eventCallback.onLogMessage("INFO", "SYSTEM", "—",
@@ -253,12 +253,13 @@ public class OrchestratorService {
             if (!allRowsSucceeded) {
                 eventCallback.onLogMessage("ERROR", "SYSTEM", stageLabel,
                     stageLabel + " had failures or conflicts. Halting Deploy All.");
-                return;
+                return false;
             }
             eventCallback.onLogMessage("INFO", "SYSTEM", stageLabel, stageLabel + " complete ✅");
         }
 
         eventCallback.onLogMessage("INFO", "SYSTEM", "—", "All stages complete.");
+        return true;
     }
 
     // ─────────────────────────────────────────────────────────────────────────
