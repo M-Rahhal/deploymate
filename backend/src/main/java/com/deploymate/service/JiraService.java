@@ -19,49 +19,43 @@ import java.util.Base64;
 @RequiredArgsConstructor
 public class JiraService {
 
-    private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
+    private static final MediaType APPLICATION_JSON = MediaType.parse("application/json; charset=utf-8");
 
-    private final OkHttpClient client;
-    private final ObjectMapper mapper;
-    private final AppProperties props;
+    private final OkHttpClient  httpClient;
+    private final ObjectMapper  objectMapper;
+    private final AppProperties appProperties;
 
 
-    private String basicAuth() {
-        String creds = props.getJira().email() + ":" + props.getJira().token();
-        return "Basic " + Base64.getEncoder().encodeToString(creds.getBytes(StandardCharsets.UTF_8));
+    private String buildBasicAuthorizationHeader() {
+        String credentials = appProperties.getJira().email() + ":" + appProperties.getJira().token();
+        return "Basic " + Base64.getEncoder().encodeToString(credentials.getBytes(StandardCharsets.UTF_8));
     }
 
-    /**
-     * Converts plain text to Atlassian Document Format (ADF) — required by Jira Cloud REST API v3.
-     */
-    private ObjectNode toAdf(String text) {
-        ObjectNode doc      = mapper.createObjectNode().put("type", "doc").put("version", 1);
-        ObjectNode para     = mapper.createObjectNode().put("type", "paragraph");
-        ObjectNode textNode = mapper.createObjectNode().put("type", "text").put("text", text);
-        para.set("content", mapper.createArrayNode().add(textNode));
-        doc.set("content", mapper.createArrayNode().add(para));
-        return doc;
+    private ObjectNode convertToAtlassianDocumentFormat(String text) {
+        ObjectNode document  = objectMapper.createObjectNode().put("type", "doc").put("version", 1);
+        ObjectNode paragraph = objectMapper.createObjectNode().put("type", "paragraph");
+        ObjectNode textNode  = objectMapper.createObjectNode().put("type", "text").put("text", text);
+        paragraph.set("content", objectMapper.createArrayNode().add(textNode));
+        document.set("content", objectMapper.createArrayNode().add(paragraph));
+        return document;
     }
 
-    /**
-     * Posts a comment on the given Jira issue.
-     */
-    public void addComment(String issueKey, String text) {
-        ObjectNode body = mapper.createObjectNode();
-        body.set("body", toAdf(text));
+    public void addComment(String issueKey, String commentText) {
+        ObjectNode requestBody = objectMapper.createObjectNode();
+        requestBody.set("body", convertToAtlassianDocumentFormat(commentText));
 
-        Request req = new Request.Builder()
-            .url(props.getJira().url() + "/rest/api/3/issue/" + issueKey + "/comment")
-            .header("Authorization", basicAuth())
+        Request request = new Request.Builder()
+            .url(appProperties.getJira().url() + "/rest/api/3/issue/" + issueKey + "/comment")
+            .header("Authorization", buildBasicAuthorizationHeader())
             .header("Content-Type",  "application/json")
             .header("Accept",        "application/json")
-            .post(RequestBody.create(body.toString(), JSON))
+            .post(RequestBody.create(requestBody.toString(), APPLICATION_JSON))
             .build();
 
-        try (Response resp = client.newCall(req).execute()) {
-            if (!resp.isSuccessful()) {
+        try (Response response = httpClient.newCall(request).execute()) {
+            if (!response.isSuccessful()) {
                 throw new DeployException(
-                    "Jira comment failed: HTTP " + resp.code(), ErrorCode.NETWORK);
+                    "Jira comment failed: HTTP " + response.code(), ErrorCode.NETWORK);
             }
             log.debug("Jira comment posted to {}", issueKey);
         } catch (DeployException e) {

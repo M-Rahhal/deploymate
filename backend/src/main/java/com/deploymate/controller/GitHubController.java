@@ -17,11 +17,10 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class GitHubController {
 
-    private final GitHubService github;
+    private final GitHubService gitHubService;
 
-    /** GET /api/github/branch-info?repo={repo}&branch={branch} */
     @GetMapping("/branch-info")
-    public ResponseEntity<Map<String, String>> branchInfo(
+    public ResponseEntity<Map<String, String>> getBranchCommitInfo(
         @RequestParam
         @NotBlank
         @Pattern(regexp = "^[a-zA-Z0-9_.-]{1,100}$", message = "Invalid repo name")
@@ -31,14 +30,14 @@ public class GitHubController {
         @Pattern(regexp = "^[a-zA-Z0-9/_.-]{1,255}$", message = "Invalid branch name")
         String branch
     ) {
-        GitHubService.CommitInfo info = github.getBranchCommitInfo(repo, branch);
-        Map<String, String> body = new LinkedHashMap<>();
-        body.put("sha",         info.sha());
-        body.put("shortSha",    info.shortSha());
-        body.put("authorLogin", info.authorLogin() != null ? info.authorLogin() : "");
-        body.put("authorName",  info.authorName());
-        body.put("message",     info.message());
-        body.put("committedAt", info.committedAt());
-        return ResponseEntity.ok(body);
+        GitHubService.CommitInfo commitInfo = gitHubService.getBranchCommitInfo(repo, branch);
+        Map<String, String> responseBody = new LinkedHashMap<>();
+        responseBody.put("sha",         commitInfo.sha());
+        responseBody.put("shortSha",    commitInfo.shortSha());
+        responseBody.put("authorLogin", commitInfo.authorLogin() != null ? commitInfo.authorLogin() : "");
+        responseBody.put("authorName",  commitInfo.authorName());
+        responseBody.put("message",     commitInfo.message());
+        responseBody.put("committedAt", commitInfo.committedAt());
+        return ResponseEntity.ok(responseBody);
     }
 }

@@ -18,48 +18,46 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class JenkinsConfigController {
 
-    private final JenkinsConfigService svc;
+    private final JenkinsConfigService jenkinsConfigService;
 
-    /** GET /api/jenkins/categories → ["cross-products", "platform", ...] */
     @GetMapping("/categories")
     public List<String> getCategories() {
-        return svc.getCategories();
+        return jenkinsConfigService.getCategories();
     }
 
-    /** POST /api/jenkins/categories  body: {"name":"cross-products"} */
     @PostMapping("/categories")
     public ResponseEntity<Map<String, String>> saveCategory(
-        @RequestBody @Validated CategoryBody body
+        @RequestBody @Validated SaveCategoryRequest requestBody
     ) {
-        String saved = svc.saveCategory(body.name());
-        return ResponseEntity.ok(Map.of("name", saved));
+        String savedName = jenkinsConfigService.saveCategory(requestBody.name());
+        return ResponseEntity.ok(Map.of("name", savedName));
     }
 
-    /** GET /api/jenkins/service-names?category=cross-products → ["payment-service", ...] */
     @GetMapping("/service-names")
     public List<String> getServiceNames(
         @RequestParam @NotBlank @Size(max = 100) String category
     ) {
-        return svc.getServiceNames(category);
+        return jenkinsConfigService.getServiceNames(category);
     }
 
-    /** POST /api/jenkins/service-names  body: {"category":"cross-products","name":"payment-service"} */
     @PostMapping("/service-names")
-    public ResponseEntity<Void> saveServiceName(@RequestBody @Validated ServiceNameBody body) {
-        svc.saveServiceName(body.category(), body.name());
+    public ResponseEntity<Void> saveServiceName(
+        @RequestBody @Validated SaveJenkinsServiceNameRequest requestBody
+    ) {
+        jenkinsConfigService.saveServiceName(requestBody.category(), requestBody.name());
         return ResponseEntity.ok().build();
     }
 
     // ─── Request body records ──────────────────────────────────────────────────
 
-    record CategoryBody(
+    record SaveCategoryRequest(
         @NotBlank
         @Size(max = 100)
         @Pattern(regexp = "^[\\w][\\w ./-]{0,98}[\\w]$|^[\\w]$")
         String name
     ) {}
 
-    record ServiceNameBody(
+    record SaveJenkinsServiceNameRequest(
         @NotBlank @Size(max = 100) String category,
         @NotBlank @Size(max = 200)
         @Pattern(regexp = "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,198}[a-zA-Z0-9]$|^[a-zA-Z0-9]$")

@@ -19,10 +19,10 @@ import java.util.Map;
 public class GlobalExceptionHandler {
 
     @ExceptionHandler(DeployException.class)
-    public ResponseEntity<Map<String, Object>> handleDeploy(DeployException ex) {
+    public ResponseEntity<Map<String, Object>> handleDeployException(DeployException ex) {
         log.error("DeployException [{}] repo={}: {}", ex.getCode(), ex.getRepo(), ex.getMessage());
 
-        int status = switch (ex.getCode()) {
+        int httpStatus = switch (ex.getCode()) {
             case CONFLICT      -> 409;
             case NOT_FOUND     -> 404;
             case AUTH_FAILED   -> 401;
@@ -30,61 +30,61 @@ public class GlobalExceptionHandler {
             default            -> 500;
         };
 
-        LinkedHashMap<String, Object> body = new LinkedHashMap<>();
-        body.put("error",   ex.getCode().name());
-        body.put("message", ex.getMessage());
-        if (ex.getRepo() != null) body.put("repo", ex.getRepo());
+        LinkedHashMap<String, Object> responseBody = new LinkedHashMap<>();
+        responseBody.put("error",   ex.getCode().name());
+        responseBody.put("message", ex.getMessage());
+        if (ex.getRepo() != null) responseBody.put("repo", ex.getRepo());
 
-        return ResponseEntity.status(status).body(body);
+        return ResponseEntity.status(httpStatus).body(responseBody);
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
-    public ResponseEntity<Map<String, Object>> handleValidation(MethodArgumentNotValidException ex) {
-        List<String> errors = ex.getBindingResult().getFieldErrors().stream()
+    public ResponseEntity<Map<String, Object>> handleBindingValidationException(MethodArgumentNotValidException ex) {
+        List<String> fieldErrors = ex.getBindingResult().getFieldErrors().stream()
             .map(fe -> fe.getField() + ": " + fe.getDefaultMessage())
             .toList();
 
-        log.warn("Validation failed: {}", errors);
+        log.warn("Validation failed: {}", fieldErrors);
 
-        LinkedHashMap<String, Object> body = new LinkedHashMap<>();
-        body.put("error",   "INVALID_INPUT");
-        body.put("details", errors);
+        LinkedHashMap<String, Object> responseBody = new LinkedHashMap<>();
+        responseBody.put("error",   "INVALID_INPUT");
+        responseBody.put("details", fieldErrors);
 
-        return ResponseEntity.badRequest().body(body);
+        return ResponseEntity.badRequest().body(responseBody);
     }
 
     @ExceptionHandler(HttpMessageNotReadableException.class)
-    public ResponseEntity<Map<String, Object>> handleUnreadableBody(HttpMessageNotReadableException ex) {
+    public ResponseEntity<Map<String, Object>> handleUnreadableRequestBodyException(HttpMessageNotReadableException ex) {
         log.warn("Unreadable request body: {}", ex.getMessage());
-        LinkedHashMap<String, Object> body = new LinkedHashMap<>();
-        body.put("error",   "INVALID_INPUT");
-        body.put("message", "Request body is missing or malformed");
-        return ResponseEntity.badRequest().body(body);
+        LinkedHashMap<String, Object> responseBody = new LinkedHashMap<>();
+        responseBody.put("error",   "INVALID_INPUT");
+        responseBody.put("message", "Request body is missing or malformed");
+        return ResponseEntity.badRequest().body(responseBody);
     }
 
     @ExceptionHandler(ConstraintViolationException.class)
-    public ResponseEntity<Map<String, Object>> handleConstraintViolation(ConstraintViolationException ex) {
-        List<String> errors = ex.getConstraintViolations().stream()
+    public ResponseEntity<Map<String, Object>> handleConstraintViolationException(ConstraintViolationException ex) {
+        List<String> violations = ex.getConstraintViolations().stream()
             .map(cv -> cv.getPropertyPath() + ": " + cv.getMessage())
             .toList();
-        log.warn("Constraint violation: {}", errors);
-        LinkedHashMap<String, Object> body = new LinkedHashMap<>();
-        body.put("error",   "INVALID_INPUT");
-        body.put("details", errors);
-        return ResponseEntity.badRequest().body(body);
+        log.warn("Constraint violation: {}", violations);
+        LinkedHashMap<String, Object> responseBody = new LinkedHashMap<>();
+        responseBody.put("error",   "INVALID_INPUT");
+        responseBody.put("details", violations);
+        return ResponseEntity.badRequest().body(responseBody);
     }
 
     @ExceptionHandler(MissingServletRequestParameterException.class)
-    public ResponseEntity<Map<String, Object>> handleMissingParam(MissingServletRequestParameterException ex) {
+    public ResponseEntity<Map<String, Object>> handleMissingRequestParameterException(MissingServletRequestParameterException ex) {
         log.warn("Missing request parameter: {}", ex.getMessage());
-        LinkedHashMap<String, Object> body = new LinkedHashMap<>();
-        body.put("error",   "INVALID_INPUT");
-        body.put("message", "Required parameter '" + ex.getParameterName() + "' is missing");
-        return ResponseEntity.badRequest().body(body);
+        LinkedHashMap<String, Object> responseBody = new LinkedHashMap<>();
+        responseBody.put("error",   "INVALID_INPUT");
+        responseBody.put("message", "Required parameter '" + ex.getParameterName() + "' is missing");
+        return ResponseEntity.badRequest().body(responseBody);
     }
 
     @ExceptionHandler(Exception.class)
-    public ResponseEntity<Map<String, String>> handleGeneric(Exception ex) {
+    public ResponseEntity<Map<String, String>> handleUnexpectedException(Exception ex) {
         log.error("Unexpected error", ex);
         return ResponseEntity.internalServerError().body(Map.of(
             "error",   "INTERNAL_ERROR",

@@ -21,8 +21,6 @@ public record ServiceRowDto(
     @Min(1) @Max(99)
     int stage,
 
-    @NotBlank
-    @Pattern(regexp = "^[a-zA-Z0-9/_.-]{1,255}$")
     String sourceBranch,
 
     @NotBlank

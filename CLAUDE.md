@@ -829,7 +829,7 @@ public String redirect() { return "forward:/index.html"; }
 
 **MDC keys:** `service` (display name or "SYSTEM"), `stage` ("Stage 1", "Service", "—")
 
-**Session separator** (written by `OrchestratorService.deployAll`):
+**Session separator** (written by `OrchestratorService.orchestrateDeployment`):
 ```
 ═══ NEW DEPLOY SESSION ═══ Ticket: PROJ-123
 ```
@@ -847,47 +847,47 @@ Log levels:
 #### `StepCallback` interface
 ```java
 public interface StepCallback {
-    void onMergeState(String id, String state, String sha, String errorMessage);
-    void onTagState(String id, String state, String releaseUrl, String errorMessage);
-    void onPipelineState(String id, String state, String buildUrl, Integer buildNumber, String errorMessage);
-    void onLog(String level, String service, String stage, String message);
+    void onMergeStateChanged(String rowId, StepExecutionState newState, String commitSha,   String errorMessage);
+    void onTagStateChanged  (String rowId, StepExecutionState newState, String releaseUrl,  String errorMessage);
+    void onPipelineStateChanged(String rowId, StepExecutionState newState, String buildUrl, Integer buildNumber, String errorMessage);
+    void onLogMessage(String level, String serviceName, String stageLabel, String message);
 }
 ```
-Currently wired to `NoOpCallback` in `DeployController`. Future: SSE.
+Currently wired to `LoggingStepCallback` (private nested class) in `DeployController`. Future: SSE.
 
-#### `mergeOnly(row, ticket, stageLabel, cb) → boolean`
-1. If `!steps.mergeBranch` → `onMergeState(SKIPPED)` → return `true`
-2. `verifyBranch()` → if not found: `onMergeState(FAILED)` → return `false`
-3. `onMergeState(RUNNING)` → call `mergeBranch()`
-4. If conflict: `onMergeState(CONFLICT)` + Jira comment → return `false`
-5. Success: `onMergeState(DONE)` + Jira comment → return `true`
+#### `executeMergeStep(row, ticket, stageLabel, eventCallback) → boolean`
+1. If `!steps.mergeBranch` → `onMergeStateChanged(SKIPPED)` → return `true`
+2. `verifyBranch()` → if not found: `onMergeStateChanged(FAILED)` → return `false`
+3. `onMergeStateChanged(RUNNING)` → call `mergeBranch()`
+4. If conflict: `onMergeStateChanged(CONFLICT)` + Jira comment → return `false`
+5. Success: `onMergeStateChanged(DONE)` + Jira comment → return `true`
 
-#### `tagOnly(row, ticket, stageLabel, cb) → boolean`
-1. If `!steps.createTag` → `onTagState(SKIPPED)` → return `true`
-2. `onTagState(RUNNING)` → `getBranchSha()` → `createTagAndPreRelease()`
-3. Success: `onTagState(DONE)` + Jira comment → return `true`
-4. Exception: `onTagState(FAILED)` → return `false`
+#### `executeTagCreationStep(row, ticket, stageLabel, eventCallback) → boolean`
+1. If `!steps.createTag` → `onTagStateChanged(SKIPPED)` → return `true`
+2. `onTagStateChanged(RUNNING)` → `getBranchSha()` → `createTagAndPreRelease()`
+3. Success: `onTagStateChanged(DONE)` + Jira comment → return `true`
+4. Exception: `onTagStateChanged(FAILED)` → return `false`
 
-#### `pipelineOnly(row, ticket, stageLabel, cb) → boolean`
-- If `!steps.triggerPipeline` → `onPipelineState(SKIPPED)` → return `true`
+#### `executePipelineStep(row, ticket, stageLabel, eventCallback) → boolean`
+- If `!steps.triggerPipeline` → `onPipelineStateChanged(SKIPPED)` → return `true`
 - `gitBranch` is determined by **`row.type()`** (not `steps.createTag`):
-  - `SERVICE` → `gitBranch = row.tagName()` (if blank → `onPipelineState(FAILED)` + return `false`)
+  - `SERVICE` → `gitBranch = row.tagName()` (if blank → `onPipelineStateChanged(FAILED)` + return `false`)
   - `SDK` → `gitBranch = "origin/" + row.targetBranch()`
-1. `onPipelineState(RUNNING)` → `triggerBuild(jenkinsJob, gitBranch)` → get `queueItemUrl`
+1. `onPipelineStateChanged(RUNNING)` → `triggerBuild(jenkinsJob, gitBranch)` → get `queueItemUrl`
 2. Poll `pollQueueItem()` every 3s until build URL is assigned
-3. `onPipelineState(RUNNING, buildUrl, buildNumber)` + Jira comment
+3. `onPipelineStateChanged(RUNNING, buildUrl, buildNumber)` + Jira comment
 4. Poll `pollBuildStatus()` every 5s until result is non-null
-5. `SUCCESS` → `onPipelineState(DONE)` + Jira → return `true`
-6. Other result → `onPipelineState(FAILED)` + Jira → return `false`
+5. `SUCCESS` → `onPipelineStateChanged(DONE)` + Jira → return `true`
+6. Other result → `onPipelineStateChanged(FAILED)` + Jira → return `false`
 
-#### `deployAllSteps(row, ticket, stageLabel, currentMerge, currentTag, currentPipeline, cb) → boolean`
-Idempotent: skips steps already in `DONE` or `SKIPPED` state.
+#### `executeAllDeploymentSteps(row, ticket, stageLabel, currentMergeState, currentTagState, currentPipelineState, eventCallback) → boolean`
+Idempotent: skips steps already in `StepExecutionState.DONE` or `SKIPPED`.
 
-#### `deployAll(rows, ticket, cb)`
+#### `orchestrateDeployment(rows, ticket, eventCallback)`
 Unified stage-ordered deployment (all row types use stage number):
 1. Writes session separator to log
 2. Groups **all rows** by stage number, sorts by stage — `type` (SDK/SERVICE) does not affect order
-3. For each stage: creates `FixedThreadPool(stageRows.size())`, runs `deployAllSteps` via `CompletableFuture.supplyAsync`, awaits all futures
+3. For each stage: creates `FixedThreadPool(stageRows.size())`, runs `executeAllDeploymentSteps` via `CompletableFuture.supplyAsync`, awaits all futures
 4. If any stage has failures → logs error → **returns early** (halts)
 5. Uses `CompletableFuture.join()` to wait for all
 
@@ -1354,14 +1354,14 @@ User clicks [Deploy All]
    POST /api/deploy/all → 202 Accepted
            │
            ▼ (virtual thread)
-   OrchestratorService.deployAll()
+   OrchestratorService.orchestrateDeployment()
            │
            ├─── For each SDK Stage (sorted by stage number, sequential)
            │    ├─── [Stage 1 SDKs, parallel]
-           │    │    ├─── mergeOnly() → skipMerge? SKIPPED : verify+merge
+           │    │    ├─── executeMergeStep() → skipMerge? SKIPPED : verify+merge
            │    │    │    ├── CONFLICT? → halt Deploy All
            │    │    │    └── DONE → continue
-           │    │    └─── pipelineOnly() → trigger BRANCH=targetBranch
+           │    │    └─── executePipelineStep() → trigger BRANCH=targetBranch
            │    │         └── poll every 5s → DONE/FAILED
            │    │
            │    ├─── All Stage 1 done? → continue to Stage 2
@@ -1370,19 +1370,19 @@ User clicks [Deploy All]
            │    └─── [Stage 2 SDKs, parallel] ...
            │
            └─── [All Services, parallel, after ALL SDK stages]
-                ├─── mergeOnly() → skipMerge? SKIPPED : verify+merge
+                ├─── executeMergeStep() → skipMerge? SKIPPED : verify+merge
                 │    ├── CONFLICT? → row stays broken, other services continue
                 │    └── DONE → continue
-                ├─── tagOnly() → skipMerge? SKIPPED : getBranchSha + createTagAndPreRelease
-                └─── pipelineOnly() → skipMerge? BRANCH : TAG param
+                ├─── executeTagCreationStep() → skipMerge? SKIPPED : getBranchSha + createTagAndPreRelease
+                └─── executePipelineStep() → skipMerge? BRANCH : TAG param
 ```
 
 ### Idempotency
 
-`deployAllSteps()` checks current state before running each step:
-- `currentMergeState === 'DONE' || 'SKIPPED'` → skip merge
-- `currentTagState === 'DONE' || 'SKIPPED'` → skip tag
-- `currentPipelineState === 'DONE'` → skip pipeline
+`executeAllDeploymentSteps()` checks current state before running each step:
+- `currentMergeState === DONE || SKIPPED` → skip merge
+- `currentTagState === DONE || SKIPPED` → skip tag
+- `currentPipelineState === DONE` → skip pipeline
 
 This allows re-running Deploy All after partial failures without duplicating completed steps.
 
@@ -1512,7 +1512,7 @@ Tests use `OkHttpClient` with a URL-rewriting interceptor to redirect real API h
 
 **`JiraServiceTest`** (tests): addComment success, addComment failure→throws NETWORK
 
-**`OrchestratorServiceTest`** (19 tests): mergeOnly skip, mergeOnly conflict halts, deployAll stage ordering; pipelineOnly — SERVICE uses tagName regardless of createTag flag, SERVICE with empty tagName returns false, SDK uses `origin/branch`
+**`OrchestratorServiceTest`** (19 tests): executeMergeStep skip, executeMergeStep conflict halts, orchestrateDeployment stage ordering; executePipelineStep — SERVICE uses tagName regardless of createTag flag, SERVICE with empty tagName returns false, SDK uses `origin/branch`
 
 #### Controller Integration Tests (MockMvc + @WebMvcTest)
 

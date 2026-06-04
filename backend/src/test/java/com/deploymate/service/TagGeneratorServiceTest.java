@@ -9,11 +9,11 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 class TagGeneratorServiceTest {
 
-    private TagGeneratorService svc;
+    private TagGeneratorService tagGeneratorService;
 
     @BeforeEach
     void setUp() {
-        svc = new TagGeneratorService();
+        tagGeneratorService = new TagGeneratorService();
     }
 
     @ParameterizedTest(name = "{0} → {1}")
@@ -31,27 +31,27 @@ class TagGeneratorServiceTest {
         "v2.3.4, v2.3.5rc1",
         "1.2.3, 1.2.4rc1",          // no v prefix
     })
-    void computeNextTag_appliesCorrectRule(String lastTag, String expected) {
-        assertThat(svc.computeNextTag(lastTag)).isEqualTo(expected);
+    void computeNextTag_appliesCorrectRule(String lastTag, String expectedNextTag) {
+        assertThat(tagGeneratorService.computeNextTag(lastTag)).isEqualTo(expectedNextTag);
     }
 
     @Test
     void computeNextTag_stagingWithoutNumber_appendsTwo() {
-        assertThat(svc.computeNextTag("v1.0.0-staging")).isEqualTo("v1.0.0-staging2");
+        assertThat(tagGeneratorService.computeNextTag("v1.0.0-staging")).isEqualTo("v1.0.0-staging2");
     }
 
     @Test
     void computeNextTag_fallback_appendsRc1() {
-        assertThat(svc.computeNextTag("my-custom-tag")).isEqualTo("my-custom-tagrc1");
+        assertThat(tagGeneratorService.computeNextTag("my-custom-tag")).isEqualTo("my-custom-tagrc1");
     }
 
     @Test
     void computeNextTag_null_returnsDefault() {
-        assertThat(svc.computeNextTag(null)).isEqualTo("v1.0.0rc1");
+        assertThat(tagGeneratorService.computeNextTag(null)).isEqualTo("v1.0.0rc1");
     }
 
     @Test
     void computeNextTag_blank_returnsDefault() {
-        assertThat(svc.computeNextTag("  ")).isEqualTo("v1.0.0rc1");
+        assertThat(tagGeneratorService.computeNextTag("  ")).isEqualTo("v1.0.0rc1");
     }
 }

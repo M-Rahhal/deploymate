@@ -16,19 +16,19 @@ import java.util.List;
 public class LogController {
 
     @GetMapping
-    public ResponseEntity<List<String>> tail(
+    public ResponseEntity<List<String>> getRecentLogLines(
         @RequestParam(defaultValue = "200") int lines
     ) {
-        Path logFile = Path.of("logs/deploymate.log");
+        Path logFilePath = Path.of("logs/deploymate.log");
 
-        if (!Files.exists(logFile)) {
+        if (!Files.exists(logFilePath)) {
             return ResponseEntity.ok(Collections.emptyList());
         }
 
         try {
-            List<String> allLines = Files.readAllLines(logFile);
-            int from = Math.max(0, allLines.size() - lines);
-            return ResponseEntity.ok(allLines.subList(from, allLines.size()));
+            List<String> allLines  = Files.readAllLines(logFilePath);
+            int          fromIndex = Math.max(0, allLines.size() - lines);
+            return ResponseEntity.ok(allLines.subList(fromIndex, allLines.size()));
         } catch (IOException e) {
             log.error("Failed to read log file", e);
             return ResponseEntity.internalServerError().build();

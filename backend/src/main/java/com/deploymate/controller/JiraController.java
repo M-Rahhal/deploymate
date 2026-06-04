@@ -15,15 +15,15 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class JiraController {
 
-    private final JiraService jira;
-    private final LogService  logSvc;
+    private final JiraService jiraService;
+    private final LogService  deploymentLogger;
 
     @PostMapping("/comment")
-    public ResponseEntity<Map<String, Object>> comment(
-        @Valid @RequestBody JiraCommentRequest req
+    public ResponseEntity<Map<String, Object>> postIssueComment(
+        @Valid @RequestBody JiraCommentRequest request
     ) {
-        jira.addComment(req.issueKey(), req.text());
-        logSvc.info("SYSTEM", "jira", "Comment posted to " + req.issueKey());
+        jiraService.addComment(request.issueKey(), request.text());
+        deploymentLogger.info("SYSTEM", "jira", "Comment posted to " + request.issueKey());
         return ResponseEntity.ok(Map.of("success", true, "message", "Comment posted"));
     }
 }

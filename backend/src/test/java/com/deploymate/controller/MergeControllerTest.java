@@ -2,7 +2,6 @@ package com.deploymate.controller;
 
 import com.deploymate.service.GitHubService;
 import com.deploymate.service.GitHubService.MergeResult;
-import com.deploymate.service.JiraService;
 import com.deploymate.service.LogService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
@@ -28,7 +27,6 @@ class MergeControllerTest {
     @Autowired ObjectMapper   mapper;
 
     @MockBean GitHubService github;
-    @MockBean JiraService   jira;
     @MockBean LogService    logSvc;
 
     private String json(Object obj) throws Exception { return mapper.writeValueAsString(obj); }

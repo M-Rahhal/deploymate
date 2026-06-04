@@ -6,14 +6,18 @@
  * The Spring Boot backend reads credentials from .env and performs all auth.
  *
  * Atomic tools (one endpoint each):
- *   merge_branch          — verify + merge source → target
- *   create_tag            — create a GitHub pre-release tag
- *   trigger_pipeline      — trigger a Jenkins pipeline build
- *   get_pipeline_status   — poll a build queue item or build URL
- *   get_next_tag          — suggest next tag + last deployed tag from Jenkins
- *   get_jenkins_categories — list saved Jenkins category prefixes
- *   add_jira_comment      — post a comment to a Jira issue
- *   get_log               — tail the server-side deployment log
+ *   merge_branch               — verify + merge source → target
+ *   create_tag                 — create a GitHub pre-release tag
+ *   trigger_pipeline           — trigger a Jenkins pipeline build
+ *   get_pipeline_status        — poll a build queue item or build URL
+ *   get_next_tag               — suggest next tag + last deployed tag from Jenkins
+ *   get_jenkins_categories     — list saved Jenkins category prefixes
+ *   save_jenkins_category      — persist a new Jenkins category
+ *   get_jenkins_service_names  — list service names under a category
+ *   save_jenkins_service_name  — persist a service name under a category
+ *   get_branch_commit_info     — fetch latest commit details for a branch
+ *   add_jira_comment           — post a comment to a Jira issue
+ *   get_log                    — tail the server-side deployment log
  *
  * Composite/batch tool:
  *   deploy_all — submit a full deployment batch to the orchestrator
@@ -386,6 +390,120 @@ server.tool(
       return text(`Saved Jenkins categories (${cats.length}): ${cats.join(", ")}`);
     } catch (err) {
       return errText("get_jenkins_categories", err);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Tool: save_jenkins_category
+// Calls POST /api/jenkins/categories. Idempotent — no error if already exists.
+// ══════════════════════════════════════════════════════════════════════════════
+server.tool(
+  "save_jenkins_category",
+  "Save a Jenkins job category (folder prefix) to DeployMate's configuration. Idempotent — safe to call even if the category already exists.",
+  {
+    name: z.string().min(1).max(100).describe("Category name to save (e.g. 'cross-products', 'platform')"),
+  },
+  async (args) => {
+    if (!checkRateLimit("save_jenkins_category")) return rateLimitExceeded();
+
+    try {
+      const res  = await http.post("/api/jenkins/categories", { name: args.name });
+      const data = res.data as { name?: string };
+      return text(`Jenkins category "${data.name ?? args.name}" saved.`);
+    } catch (err) {
+      return errText(`save_jenkins_category "${args.name}"`, err);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Tool: get_jenkins_service_names
+// Calls GET /api/jenkins/service-names?category=...
+// ══════════════════════════════════════════════════════════════════════════════
+server.tool(
+  "get_jenkins_service_names",
+  "List all Jenkins service names saved under a given category. Use together with get_jenkins_categories to construct a valid jenkinsJob path (format: category/env/serviceName).",
+  {
+    category: z.string().min(1).describe("Jenkins category name (e.g. 'cross-products')"),
+  },
+  async (args) => {
+    if (!checkRateLimit("get_jenkins_service_names", 20)) return rateLimitExceeded();
+
+    try {
+      const res   = await http.get("/api/jenkins/service-names", { params: { category: args.category } });
+      const names = res.data as string[];
+      if (!names.length) {
+        return text(`No service names saved under category "${args.category}" yet.`);
+      }
+      return text(`Service names under "${args.category}" (${names.length}): ${names.join(", ")}`);
+    } catch (err) {
+      return errText(`get_jenkins_service_names for category "${args.category}"`, err);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Tool: save_jenkins_service_name
+// Calls POST /api/jenkins/service-names. Idempotent — no error if already exists.
+// Creates the category automatically if it does not exist yet.
+// ══════════════════════════════════════════════════════════════════════════════
+server.tool(
+  "save_jenkins_service_name",
+  "Save a Jenkins service name under a category in DeployMate's configuration. Idempotent and creates the category if it does not already exist.",
+  {
+    category: z.string().min(1).max(100).describe("Jenkins category name (e.g. 'cross-products')"),
+    name:     z.string().min(1).max(200).describe("Service name to save (e.g. 'payment-service')"),
+  },
+  async (args) => {
+    if (!checkRateLimit("save_jenkins_service_name")) return rateLimitExceeded();
+
+    try {
+      await http.post("/api/jenkins/service-names", { category: args.category, name: args.name });
+      return text(`Jenkins service name "${args.name}" saved under category "${args.category}".`);
+    } catch (err) {
+      return errText(`save_jenkins_service_name "${args.category}/${args.name}"`, err);
+    }
+  }
+);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Tool: get_branch_commit_info
+// Calls GET /api/github/branch-info?repo=...&branch=...
+// Returns the latest commit SHA, author, message, and timestamp for a branch.
+// ══════════════════════════════════════════════════════════════════════════════
+server.tool(
+  "get_branch_commit_info",
+  "Fetch the latest commit details for a branch in a GitHub repository — SHA, author login, author name, commit message, and committed timestamp. Useful for verifying what is currently on a branch before merging or tagging.",
+  {
+    repo:   z.string().min(1).describe("GitHub repository name"),
+    branch: z.string().min(1).describe("Branch name (e.g. 'PROJ-123' or 'env/staging')"),
+  },
+  async (args) => {
+    if (!checkRateLimit("get_branch_commit_info", 20)) return rateLimitExceeded();
+
+    try {
+      const res  = await http.get("/api/github/branch-info", {
+        params: { repo: args.repo, branch: args.branch },
+      });
+      const data = res.data as {
+        sha:         string;
+        shortSha:    string;
+        authorLogin: string;
+        authorName:  string;
+        message:     string;
+        committedAt: string;
+      };
+      const lines = [
+        `Branch "${args.branch}" in ${args.repo}:`,
+        `  SHA: ${data.shortSha} (${data.sha})`,
+        `  Author: ${data.authorName}${data.authorLogin ? ` (@${data.authorLogin})` : ""}`,
+        `  Message: ${data.message}`,
+        `  Committed: ${data.committedAt}`,
+      ];
+      return text(lines.join("\n"));
+    } catch (err) {
+      return errText(`get_branch_commit_info for ${args.repo}/${args.branch}`, err);
     }
   }
 );

@@ -3,7 +3,6 @@ package com.deploymate.controller;
 import com.deploymate.dto.MergeRequest;
 import com.deploymate.dto.MergeResponse;
 import com.deploymate.service.GitHubService;
-import com.deploymate.service.JiraService;
 import com.deploymate.service.LogService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
@@ -15,34 +14,34 @@ import org.springframework.web.bind.annotation.*;
 @RequiredArgsConstructor
 public class MergeController {
 
-    private final GitHubService github;
-    private final JiraService   jira;
-    private final LogService    logSvc;
+    private final GitHubService gitHubService;
+    private final LogService    deploymentLogger;
 
     @PostMapping
-    public ResponseEntity<MergeResponse> merge(@Valid @RequestBody MergeRequest req) {
-        logSvc.info(req.repo(), "merge",
-            "Merging " + req.sourceBranch() + " → " + req.targetBranch());
+    public ResponseEntity<MergeResponse> mergeBranches(@Valid @RequestBody MergeRequest request) {
+        deploymentLogger.info(request.repo(), "merge",
+            "Merging " + request.sourceBranch() + " → " + request.targetBranch());
 
-        if (!github.verifyBranch(req.repo(), req.sourceBranch())) {
-            logSvc.warn(req.repo(), "merge", "Branch not found: " + req.sourceBranch());
+        if (!gitHubService.verifyBranch(request.repo(), request.sourceBranch())) {
+            deploymentLogger.warn(request.repo(), "merge",
+                "Branch not found: " + request.sourceBranch());
             return ResponseEntity.badRequest()
                 .body(new MergeResponse(false, false, null,
-                    "Branch \"" + req.sourceBranch() + "\" not found on GitHub"));
+                    "Branch \"" + request.sourceBranch() + "\" not found on GitHub"));
         }
 
-        GitHubService.MergeResult result = github.mergeBranch(
-            req.repo(), req.sourceBranch(), req.targetBranch(), req.ticket());
+        GitHubService.MergeResult mergeResult = gitHubService.mergeBranch(
+            request.repo(), request.sourceBranch(), request.targetBranch(), request.ticket());
 
-        if (result.conflict()) {
-            logSvc.error(req.repo(), "merge", "Merge conflict detected");
+        if (mergeResult.conflict()) {
+            deploymentLogger.error(request.repo(), "merge", "Merge conflict detected");
             return ResponseEntity.status(409)
                 .body(new MergeResponse(false, true, null, "Merge conflict detected"));
         }
 
-        String sha = result.sha() != null && result.sha().length() >= 7
-            ? result.sha().substring(0, 7) : result.sha();
-        logSvc.info(req.repo(), "merge", "Merge successful (SHA: " + sha + ")");
-        return ResponseEntity.ok(new MergeResponse(true, false, result.sha(), "Merge successful"));
+        String abbreviatedSha = mergeResult.sha() != null && mergeResult.sha().length() >= 7
+            ? mergeResult.sha().substring(0, 7) : mergeResult.sha();
+        deploymentLogger.info(request.repo(), "merge", "Merge successful (SHA: " + abbreviatedSha + ")");
+        return ResponseEntity.ok(new MergeResponse(true, false, mergeResult.sha(), "Merge successful"));
     }
 }

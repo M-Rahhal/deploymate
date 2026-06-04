@@ -43,19 +43,19 @@ public class AppProperties {
     }
 
     @PostConstruct
-    void validate() {
-        validateUrl("JENKINS_URL", jenkins.url());
-        validateUrl("JIRA_URL",    jira.url());
+    void validateConfiguredUrls() {
+        assertValidHttpUrl("JENKINS_URL", jenkins.url());
+        assertValidHttpUrl("JIRA_URL",    jira.url());
     }
 
-    private void validateUrl(String name, String url) {
+    private void assertValidHttpUrl(String propertyName, String url) {
         try {
             URL parsed = URI.create(url).toURL();
             if (!List.of("http", "https").contains(parsed.getProtocol())) {
-                throw new IllegalStateException(name + " must use http or https scheme");
+                throw new IllegalStateException(propertyName + " must use http or https scheme");
             }
         } catch (Exception e) {
-            throw new IllegalStateException("Invalid " + name + ": " + e.getMessage());
+            throw new IllegalStateException("Invalid " + propertyName + ": " + e.getMessage());
         }
     }
 }

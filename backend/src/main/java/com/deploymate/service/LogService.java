@@ -8,23 +8,23 @@ import org.springframework.stereotype.Service;
 @Service
 public class LogService {
 
-    public void info(String service, String stage, String message) {
-        withMdc(service, stage, () -> log.info("{}", message));
+    public void info(String serviceName, String stageLabel, String message) {
+        executeWithMdcContext(serviceName, stageLabel, () -> log.info("{}", message));
     }
 
-    public void warn(String service, String stage, String message) {
-        withMdc(service, stage, () -> log.warn("{}", message));
+    public void warn(String serviceName, String stageLabel, String message) {
+        executeWithMdcContext(serviceName, stageLabel, () -> log.warn("{}", message));
     }
 
-    public void error(String service, String stage, String message) {
-        withMdc(service, stage, () -> log.error("{}", message));
+    public void error(String serviceName, String stageLabel, String message) {
+        executeWithMdcContext(serviceName, stageLabel, () -> log.error("{}", message));
     }
 
-    private void withMdc(String service, String stage, Runnable action) {
-        MDC.put("service", service != null ? service : "SYSTEM");
-        MDC.put("stage",   stage   != null ? stage   : "—");
+    private void executeWithMdcContext(String serviceName, String stageLabel, Runnable loggingAction) {
+        MDC.put("service", serviceName != null ? serviceName : "SYSTEM");
+        MDC.put("stage",   stageLabel  != null ? stageLabel  : "—");
         try {
-            action.run();
+            loggingAction.run();
         } finally {
             MDC.remove("service");
             MDC.remove("stage");

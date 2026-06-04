@@ -1,6 +1,7 @@
 package com.deploymate.controller;
 
 import com.deploymate.dto.DeployAllRequest;
+import com.deploymate.model.StepExecutionState;
 import com.deploymate.service.LogService;
 import com.deploymate.service.OrchestratorService;
 import com.deploymate.service.OrchestratorService.StepCallback;
@@ -18,23 +19,24 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class DeployController {
 
-    private final OrchestratorService orchestrator;
-    private final LogService          logSvc;
+    private final OrchestratorService orchestratorService;
+    private final LogService          deploymentLogger;
 
     /**
      * Launches Deploy All in a virtual thread (Java 21) so the HTTP response returns
      * immediately with 202 Accepted. The UI polls individual step endpoints for state.
      */
     @PostMapping("/all")
-    public ResponseEntity<Map<String, String>> deployAll(
-        @Valid @RequestBody DeployAllRequest req
+    public ResponseEntity<Map<String, String>> startDeployAll(
+        @Valid @RequestBody DeployAllRequest request
     ) {
-        logSvc.info("SYSTEM", "—",
-            "Deploy All requested for " + req.rows().size() + " service(s)");
+        deploymentLogger.info("SYSTEM", "—",
+            "Deploy All requested for " + request.rows().size() + " service(s)");
 
         Thread.ofVirtual().name("deploy-all").start(() -> {
             try {
-                orchestrator.deployAll(req.rows(), req.ticket(), loggingCallback());
+                orchestratorService.orchestrateDeployment(
+                    request.rows(), request.ticket(), new LoggingStepCallback(deploymentLogger));
             } catch (Exception e) {
                 log.error("Deploy All failed with unexpected error", e);
             }
@@ -42,37 +44,39 @@ public class DeployController {
 
         return ResponseEntity.accepted().body(Map.of(
             "message",  "Deploy All started",
-            "services", String.valueOf(req.rows().size())
+            "services", String.valueOf(request.rows().size())
         ));
     }
 
-    /**
-     * A callback that writes state changes to the structured log.
-     * Future improvement: replace with SSE / WebSocket push to the frontend.
-     */
-    private StepCallback loggingCallback() {
-        return new StepCallback() {
-            @Override
-            public void onMergeState(String id, String state, String sha, String errorMessage) {
-                log.debug("Merge state → {} for id={} sha={} error={}", state, id, sha, errorMessage);
-            }
+    @RequiredArgsConstructor
+    private static final class LoggingStepCallback implements StepCallback {
 
-            @Override
-            public void onTagState(String id, String state, String releaseUrl, String errorMessage) {
-                log.debug("Tag state → {} for id={} url={} error={}", state, id, releaseUrl, errorMessage);
-            }
+        private final LogService deploymentLogger;
 
-            @Override
-            public void onPipelineState(String id, String state, String buildUrl,
-                                         Integer buildNumber, String errorMessage) {
-                log.debug("Pipeline state → {} for id={} build=#{} error={}",
-                    state, id, buildNumber, errorMessage);
-            }
+        @Override
+        public void onMergeStateChanged(String rowId, StepExecutionState newState,
+                                        String commitSha, String errorMessage) {
+            log.debug("Merge state changed to {} for rowId={} sha={} error={}",
+                newState, rowId, commitSha, errorMessage);
+        }
 
-            @Override
-            public void onLog(String level, String service, String stage, String message) {
-                logSvc.info(service, stage, "[" + level + "] " + message);
-            }
-        };
+        @Override
+        public void onTagStateChanged(String rowId, StepExecutionState newState,
+                                      String releaseUrl, String errorMessage) {
+            log.debug("Tag state changed to {} for rowId={} url={} error={}",
+                newState, rowId, releaseUrl, errorMessage);
+        }
+
+        @Override
+        public void onPipelineStateChanged(String rowId, StepExecutionState newState,
+                                           String buildUrl, Integer buildNumber, String errorMessage) {
+            log.debug("Pipeline state changed to {} for rowId={} build=#{} error={}",
+                newState, rowId, buildNumber, errorMessage);
+        }
+
+        @Override
+        public void onLogMessage(String level, String serviceName, String stageLabel, String message) {
+            deploymentLogger.info(serviceName, stageLabel, "[" + level + "] " + message);
+        }
     }
 }

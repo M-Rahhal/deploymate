@@ -15,43 +15,41 @@ import java.util.List;
 @RequiredArgsConstructor
 public class JenkinsConfigService {
 
-    private final JenkinsCategoryRepository     categoryRepo;
-    private final JenkinsServiceEntryRepository entryRepo;
+    private final JenkinsCategoryRepository     jenkinsCategoryRepository;
+    private final JenkinsServiceEntryRepository jenkinsServiceEntryRepository;
 
     @Transactional(readOnly = true)
     public List<String> getCategories() {
-        return categoryRepo.findAll().stream()
+        return jenkinsCategoryRepository.findAll().stream()
             .map(JenkinsCategory::getName)
             .sorted()
             .toList();
     }
 
-    /** Saves category if not already stored. Returns the category name. */
-    public String saveCategory(String name) {
-        String trimmed = name.strip();
-        if (!categoryRepo.existsByName(trimmed)) {
-            categoryRepo.save(new JenkinsCategory(trimmed));
+    public String saveCategory(String categoryName) {
+        String trimmedName = categoryName.strip();
+        if (!jenkinsCategoryRepository.existsByName(trimmedName)) {
+            jenkinsCategoryRepository.save(new JenkinsCategory(trimmedName));
         }
-        return trimmed;
+        return trimmedName;
     }
 
     @Transactional(readOnly = true)
     public List<String> getServiceNames(String categoryName) {
-        return categoryRepo.findByName(categoryName.strip())
-            .map(cat -> entryRepo.findByCategoryOrderByNameAsc(cat).stream()
+        return jenkinsCategoryRepository.findByName(categoryName.strip())
+            .map(category -> jenkinsServiceEntryRepository.findByCategoryOrderByNameAsc(category).stream()
                 .map(JenkinsServiceEntry::getName)
                 .toList())
             .orElse(List.of());
     }
 
-    /** Saves the (category, serviceName) pair if not already stored. */
     public void saveServiceName(String categoryName, String serviceName) {
-        String trimmedCat  = categoryName.strip();
-        String trimmedName = serviceName.strip();
-        JenkinsCategory cat = categoryRepo.findByName(trimmedCat)
-            .orElseGet(() -> categoryRepo.save(new JenkinsCategory(trimmedCat)));
-        if (!entryRepo.existsByCategoryAndName(cat, trimmedName)) {
-            entryRepo.save(new JenkinsServiceEntry(cat, trimmedName));
+        String trimmedCategoryName = categoryName.strip();
+        String trimmedServiceName  = serviceName.strip();
+        JenkinsCategory category = jenkinsCategoryRepository.findByName(trimmedCategoryName)
+            .orElseGet(() -> jenkinsCategoryRepository.save(new JenkinsCategory(trimmedCategoryName)));
+        if (!jenkinsServiceEntryRepository.existsByCategoryAndName(category, trimmedServiceName)) {
+            jenkinsServiceEntryRepository.save(new JenkinsServiceEntry(category, trimmedServiceName));
         }
     }
 }

@@ -16,34 +16,34 @@ import org.springframework.web.bind.annotation.*;
 @RequiredArgsConstructor
 public class PipelineController {
 
-    private final JenkinsService jenkins;
-    private final LogService     logSvc;
+    private final JenkinsService jenkinsService;
+    private final LogService     deploymentLogger;
 
     @PostMapping("/trigger")
-    public ResponseEntity<PipelineTriggerResponse> trigger(
-        @Valid @RequestBody PipelineTriggerRequest req
+    public ResponseEntity<PipelineTriggerResponse> triggerPipelineBuild(
+        @Valid @RequestBody PipelineTriggerRequest request
     ) {
-        logSvc.info(req.jenkinsJob(), "pipeline",
-            "Triggering with git_branch=" + req.gitBranch());
+        deploymentLogger.info(request.jenkinsJob(), "pipeline",
+            "Triggering with git_branch=" + request.gitBranch());
 
-        String queueUrl = jenkins.triggerBuild(req.jenkinsJob(), req.gitBranch());
+        String queueItemUrl = jenkinsService.triggerBuild(request.jenkinsJob(), request.gitBranch());
 
-        logSvc.info(req.jenkinsJob(), "pipeline", "Queued at: " + queueUrl);
-        return ResponseEntity.ok(new PipelineTriggerResponse(true, queueUrl, "Build queued"));
+        deploymentLogger.info(request.jenkinsJob(), "pipeline", "Queued at: " + queueItemUrl);
+        return ResponseEntity.ok(new PipelineTriggerResponse(true, queueItemUrl, "Build queued"));
     }
 
     @GetMapping("/status")
-    public ResponseEntity<PipelineStatusResponse> status(
+    public ResponseEntity<PipelineStatusResponse> getPipelineBuildStatus(
         @RequestParam(required = false) String queueItemUrl,
         @RequestParam(required = false) String buildUrl
     ) {
         if (queueItemUrl != null && !queueItemUrl.isBlank()) {
-            String polledBuildUrl = jenkins.pollQueueItem(queueItemUrl);
-            if (polledBuildUrl == null) {
+            String resolvedBuildUrl = jenkinsService.pollQueueItem(queueItemUrl);
+            if (resolvedBuildUrl == null) {
                 return ResponseEntity.ok(
                     new PipelineStatusResponse(BuildState.QUEUED, null, null, null, "Still queued"));
             }
-            buildUrl = polledBuildUrl;
+            buildUrl = resolvedBuildUrl;
         }
 
         if (buildUrl == null || buildUrl.isBlank()) {
@@ -52,18 +52,18 @@ public class PipelineController {
                     "Provide queueItemUrl or buildUrl"));
         }
 
-        JenkinsService.BuildStatus status     = jenkins.pollBuildStatus(buildUrl);
-        JenkinsService.LogFragment logFragment = jenkins.getBuildLog(buildUrl, 0);
-        String frag = truncateTail(logFragment.text(), 4000);
+        JenkinsService.BuildStatus  buildStatus  = jenkinsService.pollBuildStatus(buildUrl);
+        JenkinsService.LogFragment  logFragment  = jenkinsService.getBuildLog(buildUrl, 0);
+        String                      logTail      = extractLogTailFragment(logFragment.text(), 4000);
 
-        BuildState state = mapResult(status.result());
+        BuildState resolvedState = resolveBuildStateFromJenkinsResult(buildStatus.result());
         return ResponseEntity.ok(
-            new PipelineStatusResponse(state, buildUrl, status.number(), frag, state.name()));
+            new PipelineStatusResponse(resolvedState, buildUrl, buildStatus.number(), logTail, resolvedState.name()));
     }
 
-    private BuildState mapResult(String result) {
-        if (result == null) return BuildState.RUNNING;
-        return switch (result) {
+    private BuildState resolveBuildStateFromJenkinsResult(String jenkinsResult) {
+        if (jenkinsResult == null) return BuildState.RUNNING;
+        return switch (jenkinsResult) {
             case "SUCCESS" -> BuildState.SUCCESS;
             case "FAILURE" -> BuildState.FAILURE;
             case "ABORTED" -> BuildState.ABORTED;
@@ -71,8 +71,10 @@ public class PipelineController {
         };
     }
 
-    private String truncateTail(String text, int maxLen) {
-        if (text == null) return null;
-        return text.length() > maxLen ? text.substring(text.length() - maxLen) : text;
+    private String extractLogTailFragment(String fullLogText, int maxCharacters) {
+        if (fullLogText == null) return null;
+        return fullLogText.length() > maxCharacters
+            ? fullLogText.substring(fullLogText.length() - maxCharacters)
+            : fullLogText;
     }
 }
