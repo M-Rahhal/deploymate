@@ -171,7 +171,7 @@ The first build takes a few minutes (it downloads Node modules and Maven depende
 ### Step 6 — Open the app
 
 ```
-http://localhost:8080
+http://localhost:9091
 ```
 
 ### Stopping
@@ -503,7 +503,8 @@ Expected: no output, exit code 0.
 
 ```bash
 # Start the server first (Docker or local)
-./scripts/smoke-test.sh                     # tests http://localhost:8080
+./scripts/smoke-test.sh http://localhost:9091  # Docker default (host port 9091)
+./scripts/smoke-test.sh                       # tests http://localhost:8080 (local dev)
 ./scripts/smoke-test.sh http://other:8080   # or point at any URL
 ```
 
@@ -560,7 +561,7 @@ Claude Code reads MCP server configuration from **`~/.claude/settings.json`**. O
       "command": "node",
       "args": ["/absolute/path/to/deploymate/mcp/dist/server.js"],
       "env": {
-        "DEPLOYMATE_API_URL": "http://localhost:8080"
+        "DEPLOYMATE_API_URL": "http://localhost:9091"
       }
     }
   }
@@ -599,13 +600,79 @@ deploymate  ● connected  13 tools
 
 ---
 
+### Prompt examples — per operation
+
+Copy any of these directly into Claude Code with the MCP server connected and the DeployMate backend running.
+
+---
+
+**Merge a branch**
+
+> Merge branch `feature/PROJ-123` into `env/staging` for repo `payment-service`. Ticket is PROJ-123.
+
+---
+
+**Get the next suggested tag**
+
+> What is the next suggested tag for repo `payment-service`? Also check the last deployed tag from Jenkins job `cross-products/staging/payment-service`.
+
+---
+
+**Create a tag**
+
+> Create a pre-release tag for repo `payment-service` on branch `env/staging`. Get the next suggested tag name first, then create it. Ticket is PROJ-123.
+
+---
+
+**Trigger a Jenkins pipeline**
+
+> Trigger the Jenkins pipeline for job `cross-products/staging/payment-service` using tag `v2.0.3rc3` as the git_branch value.
+
+---
+
+**Check pipeline status**
+
+> Check the current status of the Jenkins build at queue item URL `<queueItemUrl>`. Keep polling until it finishes and report the final result.
+
+---
+
+**Post a Jira comment**
+
+> Post a comment on Jira ticket PROJ-123 saying: "Deployment to staging completed successfully for payment-service."
+
+---
+
+**List Jenkins categories**
+
+> List all saved Jenkins categories.
+
+---
+
+**Tail the log**
+
+> Show me the last 50 lines of the DeployMate log. Filter for errors only.
+
+---
+
+**Full Deploy All**
+
+> Deploy the following services to staging for ticket PROJ-123:
+>
+> - Repo: `payment-service`, type: SERVICE, stage: 1, source: `feature/PROJ-123`, target: `env/staging`, Jenkins job: `cross-products/staging/payment-service`, steps: merge + create tag + trigger pipeline + update Jira
+>
+> - Repo: `auth-sdk`, type: SDK, stage: 1, source: `feature/PROJ-123`, target: `env/staging`, Jenkins job: `cross-products/dev/auth-sdk`, steps: merge + trigger pipeline + update Jira
+>
+> Run all stage 1 rows in parallel. Get the next tag for any SERVICE rows before deploying.
+
+---
+
 ### Prompt example — full multi-stage deployment
 
 This example shows a realistic deployment with two SDKs in stage 1 and one service in stage 2. Paste it directly into Claude Code (with the MCP server connected and the DeployMate backend running):
 
 ---
 
-> I need to deploy ticket **PROJ-247** to staging. The backend is running at `http://localhost:8080`.
+> I need to deploy ticket **PROJ-247** to staging. The backend is running at `http://localhost:9091`.
 >
 > Here are the repositories and their order:
 >
@@ -786,16 +853,16 @@ Disable the **Merge branch** and **Create tag** step toggles for that row. The p
 
 ---
 
-### Port 8080 is already in use
+### Changing the Docker host port (default is 9091)
 
-Change the host port in `docker-compose.yml`:
+The default host port is `9091`. To use a different host port, edit `docker-compose.yml`:
 
 ```yaml
 ports:
-  - "9090:8080"   # host port 9090 → container port 8080
+  - "9092:8080"   # host port 9092 → container port 8080
 ```
 
-Then open `http://localhost:9090`.
+Then open `http://localhost:9092`.
 
 ---
 

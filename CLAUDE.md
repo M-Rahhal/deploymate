@@ -49,7 +49,7 @@ DeployMate is a **self-hosted, locally-run web application** that automates stag
 
 ### What the user does
 
-1. Opens `http://localhost:8080`
+1. Opens `http://localhost:9091`
 2. Enters a Jira ticket number (e.g. `PROJ-123`) — this auto-fills the Default Source Branch
 3. Adds rows for every affected repository — display name, repo name, type (`SDK` or `SERVICE`), **stage number**
 4. Configures per-row **source branch**, **target branch**, **Jenkins job**
@@ -1565,7 +1565,8 @@ cd frontend && npm run typecheck
 15. (Plus 4 more checks on error response shape and status validation)
 
 ```bash
-./scripts/smoke-test.sh                       # → http://localhost:8080
+./scripts/smoke-test.sh http://localhost:9091  # Docker default (host port 9091)
+./scripts/smoke-test.sh                       # → http://localhost:8080 (local dev)
 ./scripts/smoke-test.sh http://other:8080     # custom URL
 ```
 
@@ -1597,7 +1598,7 @@ services:
   deploymate:
     build: .
     image: deploymate:latest
-    ports: ["8080:8080"]
+    ports: ["9091:8080"]
     env_file: [.env]
     volumes:
       - deploymate_logs:/app/logs
@@ -1931,14 +1932,16 @@ Jenkins job path format — NO leading slash, folders use `/`:
 - Source Branch and Tag fields are greyed out when Skip Merge is ON
 - `mergeState` and `tagState` are immediately set to `SKIPPED`
 
-### Port 8080 in use
+### Port 9091 in use
+
+The default host port is `9091`. To use a different host port, edit `docker-compose.yml`:
 
 ```yaml
 # docker-compose.yml:
 ports:
-  - "9090:8080"   # host:container
+  - "9092:8080"   # host:container
 ```
-Then open `http://localhost:9090`.
+Then open `http://localhost:9092`.
 
 ### How to view logs
 
