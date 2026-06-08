@@ -24,7 +24,7 @@ export const useServiceRegistry = create<ServiceRegistryStore>((set, get) => ({
   load: async () => {
     if (get().loaded) return;
     try {
-      const response = await fetch('/services.json');
+      const response = await fetch('/services.json', { cache: 'no-store' });
       if (response.status === 404) {
         set({ loaded: true, missing: true });
         return;

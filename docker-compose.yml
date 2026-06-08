@@ -61,6 +61,7 @@ services:
     # ── Named volume for log persistence ──────────────────────────────────
     volumes:
       - deploymate_logs:/app/logs
+      - ./frontend/public/services.json:/app/static/services.json:ro
 
     # ── Health check — Spring Boot Actuator-compatible (plain endpoint) ────
     healthcheck:

@@ -6,6 +6,9 @@ spring:
     name: deploymate
   jackson:
     default-property-inclusion: non_null
+  web:
+    resources:
+      static-locations: file:./static/,classpath:/META-INF/resources/,classpath:/resources/,classpath:/static/,classpath:/public/
   datasource:
     url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/deploymate}
     driver-class-name: org.postgresql.Driver
